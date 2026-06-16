@@ -6,7 +6,10 @@ import {
   type SosSignal, type Spot, type SpotType, type CityId,
 } from "@/lib/streetgrid/data";
 import { useStreetGrid } from "@/lib/streetgrid/store";
-import { Layers, Crosshair, Siren, Plus, Clock, Route as RouteIcon } from "lucide-react";
+import {
+  Layers, Crosshair, Siren, Plus, Clock,
+  Route as RouteIcon, Search, ChevronUp, X,
+} from "lucide-react";
 import { SosModal, type SosPayload } from "./SosModal";
 import { AddSpotModal } from "./AddSpotModal";
 
@@ -19,6 +22,35 @@ const toLngLat = ([lat, lng]: [number, number]): [number, number] => [lng, lat];
 const ROUTE_GLOW = "#00f0ff";
 const ROUTE_LINE = "#00ffff";
 
+// ─── Waze camera constants ────────────────────────────────────────────────────
+//
+// PADDING MATH (Mapbox): center_y = top + (H − top − bottom) / 2
+//   top:350, H=800 → 350 + (800-350)/2 = 575px from top ≈ 72 % ✓  (car in bottom third)
+//   bottom:280 →  (800-280)/2 = 260px from top ≈ 32 % ✗  (car in top third)
+// → top:350 is the only way to get the car at the bottom third.
+//
+const WAZE_ZOOM    = 15;
+const WAZE_PITCH   = 65;   // strong 3D tilt; matched by CSS rotateX on the car marker
+const WAZE_PADDING = { top: 350, bottom: 0, left: 0, right: 0 } as const;
+
+// ─── Garage cars ──────────────────────────────────────────────────────────────
+
+type GarageCar = {
+  id: string;
+  emoji: string;
+  name: string;
+  shortName: string;
+  description: string;
+  color: string;
+};
+
+const GARAGE_CARS: GarageCar[] = [
+  { id: "bmw_m3",      emoji: "🚗",  name: "BMW M3 E92",      shortName: "BMW M3",  description: "480 л.с. · Stage 2 Tune · KW V3",           color: "#0af"    },
+  { id: "tesla_neon",  emoji: "⚡",   name: "Tesla Neon X",    shortName: "Tesla",   description: "Электрогонщик · Silent Mode · 0–100 в 2.4 с", color: "#00ff88" },
+  { id: "retro_racer", emoji: "🏎️",  name: "Retro Racer '69", shortName: "Ретро",   description: "Muscle Car · 1969 · V8 Big Block",             color: "#ffcc00" },
+  { id: "hippie_van",  emoji: "🚐",   name: "Hippie Van",      shortName: "Хиппи",   description: "Peace & Love · Slow & Groovy",                 color: "#ff6600" },
+];
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Props = {
@@ -29,45 +61,33 @@ type Props = {
 };
 
 type Bot = {
-  id: string;
-  name: string;
-  car: string;
-  emoji: string;
-  coords: [number, number];
-  patrol?: boolean;
+  id: string; name: string; car: string; emoji: string;
+  coords: [number, number]; patrol?: boolean;
 };
 
 type ActiveRoute = {
-  name: string;
-  distanceKm: number;
-  durationMin: number;
+  name: string; distanceKm: number; durationMin: number;
 };
 
 const SPOT_VISUAL: Record<SpotType, { emoji: string }> = {
-  photo:    { emoji: "📸" },
-  wash:     { emoji: "💦" },
-  friendly: { emoji: "☕" },
-  parking:  { emoji: "🅿️" },
-  landmark: { emoji: "📍" },
+  photo: { emoji: "📸" }, wash: { emoji: "💦" }, friendly: { emoji: "☕" },
+  parking: { emoji: "🅿️" }, landmark: { emoji: "📍" },
 };
 
 type MarkerRole = "user_regular" | "user_friend" | "club" | "party" | "legend" | "sos";
 
 const MARKER_THEMES: Record<MarkerRole, { border: string; glow: string; pulse: boolean }> = {
-  user_regular: { border: "#00ff66", glow: "0 0 12px rgba(0,255,102,0.65), 0 0 32px rgba(0,255,102,0.3)",   pulse: false },
-  user_friend:  { border: "#0066ff", glow: "0 0 12px rgba(0,102,255,0.65), 0 0 32px rgba(0,102,255,0.3)",   pulse: false },
-  club:         { border: "#cc00ff", glow: "0 0 12px rgba(204,0,255,0.65), 0 0 32px rgba(204,0,255,0.3)", pulse: true  },
-  party:        { border: "#ff6600", glow: "0 0 12px rgba(255,102,0,0.65), 0 0 32px rgba(255,102,0,0.3)",  pulse: true  },
-  legend:       { border: "#ffcc00", glow: "0 0 12px rgba(255,204,0,0.65), 0 0 32px rgba(255,204,0,0.3)",  pulse: false },
-  sos:          { border: "#ff0033", glow: "0 0 14px rgba(255,0,51,0.75), 0 0 36px rgba(255,0,51,0.4)",     pulse: true  },
+  user_regular: { border: "#00ff66", glow: "0 0 12px rgba(0,255,102,0.65),0 0 32px rgba(0,255,102,0.3)",   pulse: false },
+  user_friend:  { border: "#0066ff", glow: "0 0 12px rgba(0,102,255,0.65),0 0 32px rgba(0,102,255,0.3)",   pulse: false },
+  club:         { border: "#cc00ff", glow: "0 0 12px rgba(204,0,255,0.65),0 0 32px rgba(204,0,255,0.3)",   pulse: true  },
+  party:        { border: "#ff6600", glow: "0 0 12px rgba(255,102,0,0.65),0 0 32px rgba(255,102,0,0.3)",   pulse: true  },
+  legend:       { border: "#ffcc00", glow: "0 0 12px rgba(255,204,0,0.65),0 0 32px rgba(255,204,0,0.3)",   pulse: false },
+  sos:          { border: "#ff0033", glow: "0 0 14px rgba(255,0,51,0.75),0 0 36px rgba(255,0,51,0.4)",     pulse: true  },
 };
 
 const SPOT_ROLE: Record<SpotType, MarkerRole> = {
-  photo:    "club",
-  friendly: "user_friend",
-  wash:     "club",
-  parking:  "user_regular",
-  landmark: "legend",
+  photo: "club", friendly: "user_friend", wash: "club",
+  parking: "user_regular", landmark: "legend",
 };
 
 function userRole(id: string): MarkerRole {
@@ -77,14 +97,52 @@ function userRole(id: string): MarkerRole {
 const routeBtnHtml = (id: string) =>
   `<button data-route="${id}" style="margin-top:6px;background:#00f0ff;color:#001;padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px">🧭 ПОЕХАЛИ</button>`;
 
+// ─── Marker helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Waze-style CSS 3D car marker.
+ *
+ * The `perspective` parent gives depth context.
+ * The inner `.waze-car-plate` applies `rotateX(65deg)` so the flat icon lies
+ * flush on the pitched map surface (pitch 65° ≡ rotateX 65°).
+ * The map's own `bearing` rotates the scene so the car always faces forward —
+ * no need for a separate rotateZ here.
+ */
+function makeWazeCarEl(emoji: string, color: string): HTMLDivElement {
+  const outer = document.createElement("div");
+  outer.style.cssText = [
+    "perspective:300px;",
+    "width:72px;height:72px;",
+    "display:flex;align-items:flex-end;justify-content:center;",
+    "padding-bottom:6px;",
+  ].join("");
+
+  const plate = document.createElement("div");
+  plate.className = "waze-car-plate";
+  plate.style.cssText = [
+    "width:56px;height:56px;border-radius:12px;",
+    "transform:rotateX(65deg);",
+    "transform-style:preserve-3d;",
+    "will-change:transform;",
+    "display:flex;align-items:center;justify-content:center;",
+    "font-size:28px;line-height:1;",
+    "background:rgba(4,8,22,0.93);",
+    `border:3px solid ${color};`,
+    `box-shadow:0 0 22px ${color}dd,0 0 44px ${color}66,inset 0 0 10px ${color}22;`,
+    "transition:border-color 0.25s,box-shadow 0.25s;",
+  ].join("");
+  plate.textContent = emoji;
+
+  outer.appendChild(plate);
+  return outer;
+}
+
 function makeMarkerEl(
-  html: string,
-  role: MarkerRole,
-  size = 36,
+  html: string, role: MarkerRole, size = 36,
   extraStyle: Partial<CSSStyleDeclaration> = {},
 ): HTMLDivElement {
   const theme = MARKER_THEMES[role];
-  const wrap = document.createElement("div");
+  const wrap  = document.createElement("div");
   wrap.className = "sg-marker-wrap";
   wrap.style.width  = `${size}px`;
   wrap.style.height = `${size}px`;
@@ -114,23 +172,14 @@ function makeMarkerEl(
 
 function makeClusterEl(count: number): HTMLDivElement {
   const size = count < 5 ? 44 : count < 20 ? 52 : 60;
-  const el = document.createElement("div");
+  const el   = document.createElement("div");
   el.className = "sg-cluster-marker";
   Object.assign(el.style, {
-    width:           `${size}px`,
-    height:          `${size}px`,
-    borderRadius:    "50%",
-    background:      "rgba(8,10,20,0.88)",
-    border:          "2px solid #00f0ff",
-    boxShadow:       "0 0 12px rgba(0,240,255,0.65), 0 0 28px rgba(0,240,255,0.35), inset 0 0 8px rgba(0,240,255,0.15)",
-    display:         "flex",
-    alignItems:      "center",
-    justifyContent:  "center",
-    color:           "#ffffff",
-    fontWeight:      "800",
-    fontSize:        "13px",
-    cursor:          "pointer",
-    userSelect:      "none",
+    width: `${size}px`, height: `${size}px`, borderRadius: "50%",
+    background: "rgba(8,10,20,0.88)", border: "2px solid #00f0ff",
+    boxShadow: "0 0 12px rgba(0,240,255,0.65),0 0 28px rgba(0,240,255,0.35),inset 0 0 8px rgba(0,240,255,0.15)",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    color: "#fff", fontWeight: "800", fontSize: "13px", cursor: "pointer", userSelect: "none",
   });
   el.textContent = String(count);
   return el;
@@ -141,45 +190,80 @@ function makeClusterEl(count: number): HTMLDivElement {
 export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) {
   const { profile, settings, pushChat } = useStreetGrid();
 
-  const containerRef       = useRef<HTMLDivElement>(null);
-  const mapRef             = useRef<mapboxgl.Map | null>(null);
-  const featureMarkersRef     = useRef<mapboxgl.Marker[]>([]);
-  const spotMarkersRef        = useRef<Record<string, mapboxgl.Marker>>({});
-  const botMarkersRef         = useRef<mapboxgl.Marker[]>([]);
-  const sosMarkersRef         = useRef<mapboxgl.Marker[]>([]);
-  const spotRenderCleanupRef  = useRef<(() => void) | null>(null);
+  const containerRef         = useRef<HTMLDivElement>(null);
+  const mapRef               = useRef<mapboxgl.Map | null>(null);
+  const featureMarkersRef    = useRef<mapboxgl.Marker[]>([]);
+  const spotMarkersRef       = useRef<Record<string, mapboxgl.Marker>>({});
+  const botMarkersRef        = useRef<mapboxgl.Marker[]>([]);
+  const sosMarkersRef        = useRef<mapboxgl.Marker[]>([]);
+  const spotRenderCleanupRef = useRef<(() => void) | null>(null);
+  // Live-update the car marker plate without recreating the whole marker
+  const carPlateRef          = useRef<HTMLDivElement | null>(null);
+  // Heading tracking — kept in refs to avoid stale closures in watchPosition
+  const headingRef           = useRef<number>(0);
+  const prevPosRef           = useRef<[number, number] | null>(null);
+  const selectedCarIdRef     = useRef<string>(GARAGE_CARS[0].id);
 
-  const [ready,       setReady]       = useState(false);
-  const [sosOpen,     setSosOpen]     = useState(false);
-  const [addOpen,     setAddOpen]     = useState(false);
-  const [signals,     setSignals]     = useState<SosSignal[]>([]);
-  const [userSpots,   setUserSpots]   = useState<Spot[]>([]);
-  const [activeRoute, setActiveRoute] = useState<ActiveRoute | null>(null);
-  const [layers,      setLayers]      = useState({ users: true, spots: true, meets: true });
-  const [bots,        setBots]        = useState<Bot[]>([]);
+  const [ready,         setReady]         = useState(false);
+  const [sosOpen,       setSosOpen]       = useState(false);
+  const [addOpen,       setAddOpen]       = useState(false);
+  const [signals,       setSignals]       = useState<SosSignal[]>([]);
+  const [userSpots,     setUserSpots]     = useState<Spot[]>([]);
+  const [activeRoute,   setActiveRoute]   = useState<ActiveRoute | null>(null);
+  const [layers,        setLayers]        = useState({ users: true, spots: true, meets: true });
+  const [bots,          setBots]          = useState<Bot[]>([]);
+  const [selectedCarId, setSelectedCarId] = useState<string>(GARAGE_CARS[0].id);
+  const [carSheetOpen,  setCarSheetOpen]  = useState(false);
+  const [searchOpen,    setSearchOpen]    = useState(false);
 
   const cityObj      = getCity(city);
   const allSpots     = [...SPOTS, ...userSpots];
   const visibleSpots = city === "all" ? allSpots : allSpots.filter((s) => s.city === city);
   const visibleMeets = city === "all" ? MEETS : MEETS.filter((m) => m.city === city);
+  const selectedCar  = GARAGE_CARS.find((c) => c.id === selectedCarId) ?? GARAGE_CARS[0];
+
+  // Keep ref in sync so watchPosition callback reads the latest value
+  useEffect(() => { selectedCarIdRef.current = selectedCarId; }, [selectedCarId]);
+
+  // ── Live car plate update — no marker recreation needed ──────────────────────
+  useEffect(() => {
+    const plate = carPlateRef.current;
+    if (!plate) return;
+    plate.textContent = selectedCar.emoji;
+    plate.style.borderColor = selectedCar.color;
+    plate.style.boxShadow   = `0 0 22px ${selectedCar.color}dd,0 0 44px ${selectedCar.color}66,inset 0 0 10px ${selectedCar.color}22`;
+  }, [selectedCarId, selectedCar.emoji, selectedCar.color]);
 
   // ── Init map ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
     const map = new mapboxgl.Map({
-      container: containerRef.current,
-      style: "mapbox://styles/mapbox/dark-v11",
-      center: toLngLat(cityObj.coords),
-      zoom: cityObj.zoom,
-      pitch: 60,
-      bearing: -15,
-      antialias: true,
+      container:          containerRef.current,
+      style:              "mapbox://styles/mapbox/dark-v11",
+      center:             toLngLat(ME.location),
+      zoom:               WAZE_ZOOM,
+      pitch:              WAZE_PITCH,   // hard-set at init
+      bearing:            0,
+      antialias:          true,
       attributionControl: false,
     });
 
     map.on("load", () => {
-      // 3-D buildings
+      // ── Apply Waze viewport padding immediately ────────────────────────────
+      // MUST be called after load; padding persists across camera moves.
+      map.setPadding(WAZE_PADDING);
+
+      // ── Re-enforce pitch/padding whenever Mapbox tries to reset them ───────
+      // Some SDK versions reset pitch to 0 on certain interactions;
+      // this guard ensures Waze perspective is always restored.
+      map.on("pitchend", () => {
+        if (map.getPitch() < WAZE_PITCH - 5) {
+          map.easeTo({ pitch: WAZE_PITCH, duration: 400 });
+        }
+      });
+
+      // ── 3-D buildings ──────────────────────────────────────────────────────
       try {
         const styleLayers = map.getStyle().layers ?? [];
         const labelLayer  = styleLayers.find(
@@ -187,24 +271,20 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         );
         map.addLayer(
           {
-            id: "3d-buildings",
-            source: "composite",
-            "source-layer": "building",
-            filter: ["==", "extrude", "true"],
-            type: "fill-extrusion",
-            minzoom: 14,
+            id: "3d-buildings", source: "composite", "source-layer": "building",
+            filter: ["==", "extrude", "true"], type: "fill-extrusion", minzoom: 14,
             paint: {
               "fill-extrusion-color":   "#1a1f2e",
               "fill-extrusion-height":  ["get", "height"],
               "fill-extrusion-base":    ["get", "min_height"],
-              "fill-extrusion-opacity": 0.75,
+              "fill-extrusion-opacity": 0.78,
             },
           },
           labelLayer?.id,
         );
-      } catch { /* style not loaded */ }
+      } catch { /* style not yet available */ }
 
-      // POI → hide; key text labels → force visible
+      // ── Label visibility ───────────────────────────────────────────────────
       const FORCE_VISIBLE = ["road-label", "settlement-label", "settlement-subdivision-label", "water-label"];
       map.getStyle().layers?.forEach((l) => {
         if (l.id.includes("poi")) {
@@ -214,58 +294,112 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         }
       });
 
-      // Route sources & layers (glow + solid line)
+      // ── Route source + layers ──────────────────────────────────────────────
       map.addSource("sg-route", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
       });
       map.addLayer({
-        id: "sg-route-glow",
-        type: "line",
-        source: "sg-route",
+        id: "sg-route-glow", type: "line", source: "sg-route",
         layout: { "line-cap": "round", "line-join": "round" },
         paint: { "line-color": ROUTE_GLOW, "line-width": 14, "line-opacity": 0.35, "line-blur": 5 },
       });
       map.addLayer({
-        id: "sg-route-line",
-        type: "line",
-        source: "sg-route",
+        id: "sg-route-line", type: "line", source: "sg-route",
         layout: { "line-cap": "round", "line-join": "round" },
         paint: { "line-color": ROUTE_LINE, "line-width": 5.5, "line-opacity": 1 },
       });
 
-      // GeoJSON source for HTML-based spot clustering (no circle/symbol layers)
+      // ── Spot clustering source ─────────────────────────────────────────────
       map.addSource("spots", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
-        cluster: true,
-        clusterMaxZoom: 14,
-        clusterRadius: 50,
+        cluster: true, clusterMaxZoom: 14, clusterRadius: 50,
       });
 
       setReady(true);
     });
 
-    mapRef.current = map;
-
-    // Keep 3D pitch stable while panning after geo flyTo (no snap-to-flat)
     map.touchPitch.enable();
+    mapRef.current = map;
 
     return () => { map.remove(); mapRef.current = null; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Fly to city ─────────────────────────────────────────────────────────────
+  // ── Geolocation watchPosition: updates heading + rotates map bearing ─────────
+  //
+  // The map BEARING is set to the user's heading so the road ahead is always
+  // "up" on screen, exactly like Waze. The CSS rotateX(65deg) on the car
+  // marker aligns it with the pitched map surface — no additional rotateZ
+  // needed because the bearing handles orientation.
+  //
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const { latitude, longitude, heading } = pos.coords;
+        let h: number | null = heading;
+
+        // Compute bearing from position delta when device heading is unavailable
+        if ((h == null || isNaN(h)) && prevPosRef.current) {
+          const [pLat, pLng] = prevPosRef.current;
+          const dLat = latitude - pLat;
+          const dLng = longitude - pLng;
+          if (Math.hypot(dLat, dLng) > 0.00005) {
+            h = ((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360;
+          }
+        }
+        prevPosRef.current = [latitude, longitude];
+
+        if (h != null && !isNaN(h)) {
+          headingRef.current = h;
+
+          // Smoothly rotate the map to match heading — this is the Waze "bearing lock"
+          mapRef.current?.easeTo({
+            bearing:  h,
+            pitch:    WAZE_PITCH,      // re-enforce pitch on every heading update
+            duration: 600,
+          });
+        }
+      },
+      () => { /* geolocation denied — heading stays 0, pitch stays WAZE_PITCH */ },
+      { enableHighAccuracy: true, maximumAge: 400 },
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []); // mount-only; all live values read via refs
+
+  // ── Fly to city / Waze mode on tab switch ────────────────────────────────────
   useEffect(() => {
     if (!ready) return;
-    mapRef.current?.flyTo({
-      center:   toLngLat(cityObj.coords),
-      zoom:     cityObj.zoom,
-      pitch:    60,
-      bearing:  -15,
-      duration: 2000,
-      essential: true,
-    });
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (city === "tallinn" || city === "all") {
+      // Waze mode — car at bottom, road ahead fills top, bearing = heading
+      map.setPadding(WAZE_PADDING);
+      map.flyTo({
+        center:   toLngLat(ME.location),
+        zoom:     WAZE_ZOOM,
+        pitch:    WAZE_PITCH,
+        bearing:  headingRef.current,
+        duration: 2000,
+        essential: true,
+      });
+    } else {
+      // City overview — flat look, no bottom-third offset
+      map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
+      map.flyTo({
+        center:   toLngLat(cityObj.coords),
+        zoom:     cityObj.zoom,
+        pitch:    WAZE_PITCH,
+        bearing:  0,
+        duration: 2000,
+        essential: true,
+      });
+    }
   }, [city, ready, cityObj.coords, cityObj.zoom]);
 
   // ── Bots simulation ─────────────────────────────────────────────────────────
@@ -273,12 +407,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const base = cityObj.coords;
     const r    = city === "all" ? 0.5 : 0.012;
     const init: Bot[] = [
-      { id: "b1", name: "Никита",  car: "BMW M4",        emoji: "🏎️", coords: [base[0] + r,        base[1] + r] },
-      { id: "b2", name: "Артур",   car: "Toyota Supra",  emoji: "🚗", coords: [base[0] - r,        base[1] + r * 0.6] },
-      { id: "b3", name: "Кристи",  car: "Subaru WRX",    emoji: "🚙", coords: [base[0] + r * 0.4,  base[1] - r] },
+      { id: "b1", name: "Никита",  car: "BMW M4",       emoji: "🏎️", coords: [base[0] + r,       base[1] + r] },
+      { id: "b2", name: "Артур",   car: "Toyota Supra", emoji: "🚗", coords: [base[0] - r,       base[1] + r * 0.6] },
+      { id: "b3", name: "Кристи",  car: "Subaru WRX",   emoji: "🚙", coords: [base[0] + r * 0.4, base[1] - r] },
     ];
     setBots(init);
-
     const tick = setInterval(() => {
       setBots((prev) => prev.map((b) => ({
         ...b,
@@ -288,7 +421,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         ] as [number, number],
       })));
     }, 2500);
-
     const patrolTick = setInterval(() => {
       setBots((prev) => {
         if (prev.some((b) => b.patrol)) return prev.filter((b) => !b.patrol);
@@ -301,17 +433,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         }];
       });
     }, 15000);
-
     return () => { clearInterval(tick); clearInterval(patrolTick); };
   }, [city, cityObj.coords]);
 
-  // ── Helpers ─────────────────────────────────────────────────────────────────
-  // makeMarkerEl / makeClusterEl / routeBtnHtml are module-level helpers above
-
   // ── Route drawing ────────────────────────────────────────────────────────────
   const setRouteGeoJson = useCallback((geometry: GeoJSON.LineString | null) => {
-    const src = mapRef.current?.getSource("sg-route") as mapboxgl.GeoJSONSource | undefined;
-    src?.setData({
+    (mapRef.current?.getSource("sg-route") as mapboxgl.GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
       features: geometry ? [{ type: "Feature", properties: {}, geometry }] : [],
     });
@@ -319,16 +446,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   const fitRouteBounds = useCallback((coords: [number, number][]) => {
     if (coords.length < 2) return;
-    const bounds = coords.reduce(
-      (b, c) => b.extend(c),
-      new mapboxgl.LngLatBounds(coords[0], coords[0]),
-    );
+    const bounds = coords.reduce((b, c) => b.extend(c), new mapboxgl.LngLatBounds(coords[0], coords[0]));
     mapRef.current?.fitBounds(bounds, {
-      padding: { top: 120, bottom: 120, left: 60, right: 60 },
-      pitch:   60,
-      bearing: -10,
-      duration: 1400,
-      essential: true,
+      padding: { top: 140, bottom: 180, left: 60, right: 60 },
+      pitch: WAZE_PITCH, bearing: headingRef.current, duration: 1400, essential: true,
     });
   }, []);
 
@@ -354,28 +475,29 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     }
   }, [fitRouteBounds, setRouteGeoJson]);
 
-  const clearRoute = useCallback(() => {
-    setRouteGeoJson(null);
-    setActiveRoute(null);
-  }, [setRouteGeoJson]);
+  const clearRoute   = useCallback(() => { setRouteGeoJson(null); setActiveRoute(null); }, [setRouteGeoJson]);
+  const triggerRoute = useCallback((c: [number, number], n: string) => runRouteTo(c, n), [runRouteTo]);
 
-  const triggerRoute = useCallback((coords: [number, number], name: string) => {
-    runRouteTo(coords, name);
-  }, [runRouteTo]);
-
-  // ── Feature markers (ME, users, meets — not spots) ───────────────────────────
+  // ── Feature markers ──────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
 
     featureMarkersRef.current.forEach((m) => m.remove());
     featureMarkersRef.current = [];
+    carPlateRef.current = null;
 
-    // ME
+    // ME — CSS 3D car marker
     if (city === "tallinn" || city === "all") {
-      const m = new mapboxgl.Marker({ element: makeMarkerEl("📍", "user_friend", 42) })
+      const el = makeWazeCarEl(selectedCar.emoji, selectedCar.color);
+      // Store reference to inner plate for live colour/emoji updates
+      carPlateRef.current = el.querySelector(".waze-car-plate") as HTMLDivElement | null;
+
+      const m = new mapboxgl.Marker({ element: el, anchor: "bottom" })
         .setLngLat(toLngLat(ME.location))
-        .setPopup(new mapboxgl.Popup({ offset: 22 }).setHTML(`<b>${profile.handle}</b><br/>${profile.status}`))
+        .setPopup(new mapboxgl.Popup({ offset: 18 }).setHTML(
+          `<b>${profile.handle}</b><br/>${selectedCar.name}`,
+        ))
         .addTo(map);
       featureMarkersRef.current.push(m);
     }
@@ -384,7 +506,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (layers.users && (city === "tallinn" || city === "all")) {
       USERS.forEach((u) => {
         const popup = new mapboxgl.Popup({ offset: 22 }).setHTML(
-          `<div><b>${u.handle}</b><br/>${u.car.year} ${u.car.make} ${u.car.model}<br/><i>${u.status === "moving" ? "В движении" : "На споте"}</i><br/><button data-garage="${u.id}" style="margin-top:6px;background:#FF3B30;color:#fff;border:none;padding:5px 10px;border-radius:6px;font-weight:bold;cursor:pointer">Открыть гараж</button></div>`,
+          `<div><b>${u.handle}</b><br/>${u.car.year} ${u.car.make} ${u.car.model}<br/>` +
+          `<i>${u.status === "moving" ? "В движении" : "На споте"}</i><br/>` +
+          `<button data-garage="${u.id}" style="margin-top:6px;background:#FF3B30;color:#fff;border:none;padding:5px 10px;border-radius:6px;font-weight:bold;cursor:pointer">Открыть гараж</button></div>`,
         );
         popup.on("open", () => setTimeout(() => {
           document.querySelector<HTMLButtonElement>(`button[data-garage="${u.id}"]`)
@@ -392,8 +516,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         }, 0));
         const m = new mapboxgl.Marker({
           element: makeMarkerEl(u.status === "moving" ? "🏎️" : "🅿️", userRole(u.id)),
-        })
-          .setLngLat(toLngLat(u.location)).setPopup(popup).addTo(map);
+        }).setLngLat(toLngLat(u.location)).setPopup(popup).addTo(map);
         featureMarkersRef.current.push(m);
       });
     }
@@ -414,7 +537,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layers.users, layers.meets, ready, city, visibleMeets.length, onOpenGarage, profile.handle, profile.status, triggerRoute]);
+  }, [layers.users, layers.meets, ready, city, visibleMeets.length, onOpenGarage, profile.handle, profile.status, triggerRoute, selectedCarId]);
 
   // ── Spots: GeoJSON clustering + dynamic HTML markers ───────────────────────
   useEffect(() => {
@@ -457,18 +580,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       for (const feature of features) {
         const props = feature.properties;
         if (!props) continue;
-
         const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
 
-        // Cluster → custom HTML bubble
         if (props.point_count != null) {
           const clusterId = props.cluster_id as number;
           const key = `cluster-${clusterId}`;
           if (seen.has(key)) continue;
           seen.add(key);
-
-          const count = Number(props.point_count);
-          const el = makeClusterEl(count);
+          const el = makeClusterEl(Number(props.point_count));
           el.addEventListener("click", (e) => {
             e.stopPropagation();
             source.getClusterExpansionZoom(clusterId, (err, zoom) => {
@@ -476,17 +595,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
               map.easeTo({ center: coords, zoom: zoom + 0.5, duration: 600 });
             });
           });
-
-          const marker = new mapboxgl.Marker({ element: el }).setLngLat(coords).addTo(map);
-          spotMarkersRef.current[key] = marker;
+          spotMarkersRef.current[key] = new mapboxgl.Marker({ element: el }).setLngLat(coords).addTo(map);
           continue;
         }
 
-        // Single spot → original neon HTML icon
         const id = String(props.id);
         if (!id || seen.has(id)) continue;
         seen.add(id);
-
         const spot = spotsById[id];
         if (!spot) continue;
 
@@ -498,19 +613,15 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           document.querySelector<HTMLButtonElement>(`button[data-route="spot-${id}"]`)
             ?.addEventListener("click", () => triggerRoute(spot.coords, spot.name));
         }, 0));
-
-        const marker = new mapboxgl.Marker({
+        spotMarkersRef.current[id] = new mapboxgl.Marker({
           element: makeMarkerEl(spot.photo || v.emoji, SPOT_ROLE[spot.type]),
-        })
-          .setLngLat(coords).setPopup(popup).addTo(map);
-        spotMarkersRef.current[id] = marker;
+        }).setLngLat(coords).setPopup(popup).addTo(map);
       }
     };
 
     const onSourceData = (e: mapboxgl.MapSourceDataEvent) => {
       if (e.sourceId === "spots" && e.isSourceLoaded) renderSpotMarkers();
     };
-
     map.on("moveend", renderSpotMarkers);
     map.on("zoomend", renderSpotMarkers);
     map.on("sourcedata", onSourceData);
@@ -522,7 +633,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       map.off("sourcedata", onSourceData);
       clearSpotMarkers();
     };
-
     return () => spotRenderCleanupRef.current?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.spots, ready, city, visibleSpots, triggerRoute]);
@@ -536,9 +646,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (!layers.users || !settings.showBots) return;
     bots.forEach((b) => {
       if (b.patrol && !settings.showPatrols) return;
-      const m = new mapboxgl.Marker({
-        element: makeMarkerEl(b.emoji, b.patrol ? "sos" : "user_regular", 34),
-      })
+      const m = new mapboxgl.Marker({ element: makeMarkerEl(b.emoji, b.patrol ? "sos" : "user_regular", 34) })
         .setLngLat(toLngLat(b.coords))
         .setPopup(new mapboxgl.Popup({ offset: 20 }).setHTML(
           `<b>${b.name}</b><br/>${b.car}${b.patrol ? '<br/><i style="color:#ff3b30">⚠ Патруль рядом</i>' : ""}`,
@@ -562,18 +670,23 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         document.querySelector<HTMLButtonElement>(`button[data-route="sos-${sig.id}"]`)
           ?.addEventListener("click", () => triggerRoute(sig.coords, "SOS · " + sig.label));
       }, 0));
-      const m = new mapboxgl.Marker({ element: makeMarkerEl("🆘", "sos", 44) })
-        .setLngLat(toLngLat(sig.coords)).setPopup(popup).addTo(map);
-      sosMarkersRef.current.push(m);
+      sosMarkersRef.current.push(
+        new mapboxgl.Marker({ element: makeMarkerEl("🆘", "sos", 44) })
+          .setLngLat(toLngLat(sig.coords)).setPopup(popup).addTo(map),
+      );
     });
   }, [signals, ready, triggerRoute]);
 
-  // ── Focus spot externally ────────────────────────────────────────────────────
+  // ── Focus spot ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!focusSpot || !ready) return;
     const target = [...SPOTS, ...userSpots].find((s) => s.id === focusSpot.id);
     if (!target) return;
-    mapRef.current?.flyTo({ center: toLngLat(target.coords), zoom: 15, pitch: 60, bearing: -10, duration: 1600, essential: true });
+    mapRef.current?.flyTo({
+      center: toLngLat(target.coords), zoom: 16,
+      pitch: WAZE_PITCH, bearing: headingRef.current,
+      duration: 1600, essential: true,
+    });
     setTimeout(() => {
       const m = spotMarkersRef.current[target.id];
       if (m && !m.getPopup()?.isOpen()) m.togglePopup();
@@ -586,42 +699,40 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     runRouteTo(routeRequest.coords, routeRequest.name);
   }, [routeRequest, ready, runRouteTo]);
 
-  // ── Map controls ─────────────────────────────────────────────────────────────
+  // ── Recenter to Waze mode ─────────────────────────────────────────────────────
   const recenter = () => {
     const map = mapRef.current;
     if (!map) return;
-
-    if (map.getZoom() < 14) {
-      // Overview → juicy 3D close-up on user
-      map.flyTo({
-        center:    toLngLat(ME.location),
-        zoom:      16.5,
-        pitch:     50,
-        bearing:   0,
-        duration:  2000,
-        essential: true,
-      });
-    } else {
-      // Close-up → back to city overview, flat horizon
-      map.flyTo({
-        center:    toLngLat(cityObj.coords),
-        zoom:      cityObj.zoom,
-        pitch:     0,
-        bearing:   0,
-        duration:  2000,
-        essential: true,
-      });
-    }
+    map.setPadding(WAZE_PADDING);
+    map.flyTo({
+      center:   toLngLat(ME.location),
+      zoom:     WAZE_ZOOM,
+      pitch:    WAZE_PITCH,
+      bearing:  headingRef.current,
+      duration: 1500,
+      essential: true,
+    });
   };
 
   // ── SOS submit ───────────────────────────────────────────────────────────────
   const handleSosSubmit = ({ preset, label, note, coords }: SosPayload) => {
     const time = new Date().toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
-    const sig: SosSignal = { id: String(Date.now()), type: preset ?? "other", label, note: note || undefined, user: profile.handle, coords, time };
+    const sig: SosSignal = {
+      id: String(Date.now()), type: preset ?? "other", label,
+      note: note || undefined, user: profile.handle, coords, time,
+    };
     setSignals((s) => [...s, sig]);
-    setTimeout(() => mapRef.current?.flyTo({ center: toLngLat(coords), zoom: 15, pitch: 60, bearing: -10, duration: 1200, essential: true }), 100);
+    setTimeout(() => mapRef.current?.flyTo({
+      center: toLngLat(coords), zoom: 16,
+      pitch: WAZE_PITCH, bearing: headingRef.current,
+      duration: 1200, essential: true,
+    }), 100);
     const targetCity = city === "all" ? "tallinn" : city;
-    pushChat({ city: targetCity, user: profile.handle, text: `🆘 ${profile.handle} нужна помощь: ${label}${note && preset ? ` — ${note}` : ""} · [Посмотреть на карте]`, time, sos: true });
+    pushChat({
+      city: targetCity, user: profile.handle,
+      text: `🆘 ${profile.handle} нужна помощь: ${label}${note && preset ? ` — ${note}` : ""} · [Посмотреть на карте]`,
+      time, sos: true,
+    });
     setSosOpen(false);
   };
 
@@ -631,8 +742,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const coords: [number, number] = center ? [center.lat, center.lng] : cityObj.coords;
     const v = SPOT_VISUAL[data.type];
     setUserSpots((s) => [...s, {
-      id: `us_${Date.now()}`,
-      city: city === "all" ? "tallinn" : city,
+      id: `us_${Date.now()}`, city: city === "all" ? "tallinn" : city,
       name: data.name, type: data.type, coords,
       description: data.description, photo: v.emoji,
       rating: 0, reviews: 0, userAdded: true,
@@ -642,17 +752,17 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="relative sg-map-wrap">
-      <div ref={containerRef} className="sg-map h-[calc(100vh-210px)] w-full" />
+    <div className="relative sg-map-wrap h-full">
+      <div ref={containerRef} className="sg-map h-full w-full" />
 
-      {/* Navigation overlay — full width top */}
+      {/* ── Navigation overlay ── */}
       {activeRoute && (
-        <div className="absolute top-3 left-3 right-3 z-[600] glass-strong rounded-2xl px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3 animate-float-up border border-accent/20 shadow-[0_0_24px_rgba(0,240,255,0.15)]">
-          <div className="h-10 w-10 shrink-0 grid place-items-center rounded-xl bg-accent/15 text-accent glow-cyan">
+        <div className="absolute top-3 left-3 right-14 z-[600] glass-strong rounded-2xl px-3 py-2.5 flex items-center gap-2 animate-float-up border border-accent/20 shadow-[0_0_24px_rgba(0,240,255,0.15)]">
+          <div className="h-9 w-9 shrink-0 grid place-items-center rounded-xl bg-accent/15 text-accent">
             <RouteIcon className="h-4 w-4" />
           </div>
           <div className="min-w-0 flex-1 overflow-hidden">
-            <div className="text-[10px] text-muted-foreground tracking-widest uppercase">Навигатор</div>
+            <div className="text-[9px] text-muted-foreground tracking-widest uppercase">Навигатор</div>
             <div className="text-xs font-bold text-foreground truncate">{activeRoute.name}</div>
             <div className="flex items-center gap-3 text-xs font-bold mt-0.5">
               <span className="text-accent shrink-0">{activeRoute.distanceKm.toFixed(1)} км</span>
@@ -664,56 +774,253 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           </div>
           <button
             onClick={clearRoute}
-            className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-2.5 sm:px-3 py-2 text-[10px] sm:text-[11px] font-bold tracking-wide text-foreground/90 hover:bg-primary/25 hover:border-accent/30 transition whitespace-nowrap"
+            className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] font-bold tracking-wide text-foreground/80 hover:bg-primary/25 transition whitespace-nowrap"
           >
-            Сбросить маршрут
+            Сбросить
           </button>
         </div>
       )}
 
-      {/* Layer & recenter buttons — left side, below possible nav overlay */}
-      <div className="absolute top-20 left-3 z-[600] flex flex-col gap-2">
+      {/* ── Top-right controls ── */}
+      <div className="absolute top-3 right-3 z-[600] flex flex-col gap-1.5">
         <button
           onClick={() => setLayers((l) => ({ ...l, users: !l.users }))}
-          className={`h-10 w-10 grid place-items-center rounded-xl glass-strong transition ${layers.users ? "text-primary glow-red" : "text-muted-foreground"}`}
+          title="Слои"
+          className={`h-9 w-9 grid place-items-center rounded-xl glass-strong transition ${
+            layers.users ? "text-accent/90" : "text-muted-foreground/40"
+          }`}
         >
           <Layers className="h-4 w-4" />
         </button>
         <button
           onClick={recenter}
-          className="h-10 w-10 grid place-items-center rounded-xl glass-strong text-accent"
+          title="Вернуться к машине"
+          className="h-9 w-9 grid place-items-center rounded-xl glass-strong text-accent/70 hover:text-accent transition"
         >
           <Crosshair className="h-4 w-4" />
         </button>
       </div>
 
-      {/* Add Spot button — bottom left */}
-      <button
-        onClick={() => setAddOpen(true)}
-        className="absolute bottom-9 left-4 z-[600] h-14 w-14 rounded-full bg-accent grid place-items-center glow-cyan active:scale-95 transition"
-        aria-label="Добавить спот"
-      >
-        <Plus className="h-7 w-7 text-accent-foreground" />
-      </button>
+      {/* ── Bottom Waze bar (above tab bar) ── */}
+      <div className="absolute bottom-[62px] left-0 right-0 z-[600] flex flex-col gap-2 px-3">
 
-      {/* SOS button — bottom right, lifted to avoid Mapbox attribution */}
-      <div className="absolute bottom-9 right-4 z-[600] flex flex-col items-center gap-1">
+        {/* Row 1 – Plus · Car pill · SOS */}
+        <div className="flex items-end gap-2">
+          <button
+            onClick={() => setAddOpen(true)}
+            aria-label="Добавить спот"
+            className="h-12 w-12 shrink-0 rounded-full bg-accent grid place-items-center glow-cyan active:scale-95 transition shadow-lg"
+          >
+            <Plus className="h-5 w-5 text-accent-foreground" />
+          </button>
+
+          {/* Car selector pill */}
+          <button
+            onClick={() => setCarSheetOpen(true)}
+            className="flex-1 min-w-0 glass-strong rounded-2xl px-3 py-2 flex items-center gap-2.5 active:opacity-80 transition border border-white/10"
+            style={{ borderColor: `${selectedCar.color}33` }}
+          >
+            <span
+              className="shrink-0 w-3 h-3 rounded-full"
+              style={{ background: selectedCar.color, boxShadow: `0 0 8px ${selectedCar.color}` }}
+            />
+            <span className="text-xl shrink-0 leading-none">{selectedCar.emoji}</span>
+            <div className="min-w-0 flex-1 text-left">
+              <div className="text-[9px] text-muted-foreground leading-none tracking-wider uppercase">
+                CSS 3D · pitch {WAZE_PITCH}°
+              </div>
+              <div className="text-xs font-bold truncate mt-0.5">{selectedCar.name}</div>
+            </div>
+            <ChevronUp className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          </button>
+
+          {/* SOS */}
+          <div className="shrink-0 flex flex-col items-center gap-0.5">
+            <button
+              onClick={() => setSosOpen(true)}
+              aria-label="SOS"
+              className="h-12 w-12 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center glow-red animate-pulse-ring active:scale-95 transition shadow-lg"
+            >
+              <Siren className="h-5 w-5 text-white" />
+            </button>
+            <span className="text-[9px] font-black tracking-widest text-primary leading-none">SOS</span>
+          </div>
+        </div>
+
+        {/* Row 2 – Search */}
         <button
-          onClick={() => setSosOpen(true)}
-          className="h-16 w-16 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center glow-red animate-pulse-ring active:scale-95 transition"
-          aria-label="SOS"
+          onClick={() => setSearchOpen(true)}
+          className="w-full glass-strong rounded-full px-4 py-3 flex items-center gap-3 active:opacity-80 transition border border-white/10 shadow-lg"
         >
-          <Siren className="h-7 w-7 text-white" />
+          <Search className="h-4 w-4 text-muted-foreground shrink-0" />
+          <span className="text-sm text-muted-foreground flex-1 text-left">Куда едем?</span>
+          <span className="text-[10px] bg-accent/20 text-accent px-2 py-0.5 rounded-full font-bold shrink-0 border border-accent/30">
+            GO
+          </span>
         </button>
-        <span className="text-[10px] font-black tracking-widest text-primary leading-none">SOS</span>
       </div>
 
-      <SosModal
-        open={sosOpen}
-        fallbackCoords={ME.location}
-        onClose={() => setSosOpen(false)}
-        onSubmit={handleSosSubmit}
-      />
+      {/* ── Garage bottom sheet ── */}
+      {carSheetOpen && (
+        <div className="fixed inset-0 z-[800]" onClick={() => setCarSheetOpen(false)}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div
+            className="absolute bottom-0 left-0 right-0 glass-strong rounded-t-3xl p-5 pb-10 animate-float-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 bg-white/20 rounded-full mx-auto mb-5" />
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <h3 className="text-sm font-bold tracking-wider uppercase">Гараж</h3>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  Выбери машину — маркер на карте обновится мгновенно
+                </p>
+              </div>
+              <button
+                onClick={() => setCarSheetOpen(false)}
+                className="h-7 w-7 grid place-items-center rounded-lg glass text-muted-foreground hover:text-foreground transition"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {GARAGE_CARS.map((car) => {
+              const active = selectedCarId === car.id;
+              return (
+                <button
+                  key={car.id}
+                  onClick={() => { setSelectedCarId(car.id); setCarSheetOpen(false); }}
+                  className={`flex items-center gap-3 w-full p-3.5 rounded-2xl mb-2 transition text-left ${
+                    active ? "border" : "glass border border-white/5 hover:border-white/15"
+                  }`}
+                  style={active ? {
+                    background:   `${car.color}18`,
+                    borderColor:  `${car.color}55`,
+                    boxShadow:    `0 0 18px ${car.color}1a`,
+                  } : {}}
+                >
+                  {/* Preview: CSS 3D mini card */}
+                  <div
+                    className="shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-2xl"
+                    style={{
+                      background: active ? `${car.color}28` : "rgba(255,255,255,0.05)",
+                      boxShadow:  active ? `0 0 14px ${car.color}55` : "none",
+                      transform:  "perspective(120px) rotateX(30deg)",
+                      border:     `2px solid ${active ? car.color : "rgba(255,255,255,0.08)"}`,
+                    }}
+                  >
+                    {car.emoji}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-bold">{car.name}</div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">{car.description}</div>
+                    <div className="text-[10px] mt-1" style={{ color: `${car.color}bb` }}>
+                      CSS 3D · rotateX({WAZE_PITCH}°) · bearing-lock
+                    </div>
+                  </div>
+                  {active && (
+                    <span
+                      className="text-[10px] font-black shrink-0 px-2.5 py-1 rounded-full"
+                      style={{ color: car.color, background: `${car.color}22`, border: `1px solid ${car.color}55` }}
+                    >
+                      ✓ В ИГРЕ
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Search bottom sheet ── */}
+      {searchOpen && (
+        <div className="fixed inset-0 z-[800]" onClick={() => setSearchOpen(false)}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div
+            className="absolute bottom-0 left-0 right-0 glass-strong rounded-t-3xl p-5 pb-10 max-h-[72vh] overflow-y-auto animate-float-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-10 h-1 bg-white/20 rounded-full mx-auto mb-5" />
+            <div className="flex items-center gap-3 mb-5">
+              <div className="flex-1 glass rounded-full px-3 py-2.5 flex items-center gap-2 border border-white/10">
+                <Search className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm text-muted-foreground">Куда едем?</span>
+              </div>
+              <button
+                onClick={() => setSearchOpen(false)}
+                className="h-9 w-9 grid place-items-center rounded-xl glass border border-white/10 text-muted-foreground hover:text-foreground transition"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {visibleSpots.length > 0 && (
+              <>
+                <div className="text-[9px] text-muted-foreground tracking-widest uppercase mb-2">Споты рядом</div>
+                {visibleSpots.slice(0, 6).map((spot) => (
+                  <div key={spot.id} className="flex items-center gap-3 glass rounded-2xl px-3 py-2.5 mb-2 border border-white/5">
+                    <button
+                      className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                      onClick={() => {
+                        setSearchOpen(false);
+                        mapRef.current?.flyTo({
+                          center: toLngLat(spot.coords), zoom: 16,
+                          pitch: WAZE_PITCH, bearing: headingRef.current,
+                          duration: 1600, essential: true,
+                        });
+                      }}
+                    >
+                      <span className="text-xl shrink-0">{SPOT_VISUAL[spot.type].emoji}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-bold truncate">{spot.name}</div>
+                        <div className="text-[10px] text-muted-foreground">★ {spot.rating} · {spot.description.slice(0, 30)}…</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => { setSearchOpen(false); triggerRoute(spot.coords, spot.name); }}
+                      className="shrink-0 text-[10px] bg-accent/20 text-accent border border-accent/30 px-2.5 py-1 rounded-full font-bold hover:bg-accent/30 transition"
+                    >GO</button>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {visibleMeets.length > 0 && (
+              <>
+                <div className="text-[9px] text-muted-foreground tracking-widest uppercase mb-2 mt-4">Митапы</div>
+                {visibleMeets.map((mt) => (
+                  <div key={mt.id} className="flex items-center gap-3 glass rounded-2xl px-3 py-2.5 mb-2 border border-white/5">
+                    <button
+                      className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                      onClick={() => {
+                        setSearchOpen(false);
+                        mapRef.current?.flyTo({
+                          center: toLngLat(mt.coords), zoom: 15,
+                          pitch: WAZE_PITCH, bearing: headingRef.current,
+                          duration: 1600, essential: true,
+                        });
+                      }}
+                    >
+                      <span className="text-xl shrink-0">{mt.cover}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-bold truncate">{mt.title}</div>
+                        <div className="text-[10px] text-muted-foreground">{mt.time} · 👥 {mt.going} едут</div>
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => { setSearchOpen(false); triggerRoute(mt.coords, mt.title); }}
+                      className="shrink-0 text-[10px] bg-accent/20 text-accent border border-accent/30 px-2.5 py-1 rounded-full font-bold hover:bg-accent/30 transition"
+                    >GO</button>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      <SosModal open={sosOpen} fallbackCoords={ME.location} onClose={() => setSosOpen(false)} onSubmit={handleSosSubmit} />
       <AddSpotModal open={addOpen} onClose={() => setAddOpen(false)} onSubmit={handleAddSpot} />
     </div>
   );
