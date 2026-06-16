@@ -13,19 +13,6 @@ import { StreetGridProvider } from "@/lib/streetgrid/store";
 import type { CityId, Spot } from "@/lib/streetgrid/data";
 
 export const Route = createFileRoute("/")({
-  head: () => ({
-    meta: [
-      { title: "STREETGRID — Авто-соцсеть Эстонии" },
-      { name: "description", content: "Премиальная авто-соцсеть Эстонии: митапы, гараж, круиз-маршруты и секретные споты в Таллинне, Тарту, Пярну и Нарве." },
-      { property: "og:title", content: "STREETGRID" },
-      { property: "og:description", content: "Премиальная авто-соцсеть: митапы, гараж, маршруты и споты Эстонии." },
-    ],
-    links: [
-      { rel: "preconnect", href: "https://fonts.googleapis.com" },
-      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
-      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800;900&family=Orbitron:wght@700;900&display=swap" },
-    ],
-  }),
   component: App,
 });
 
