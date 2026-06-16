@@ -1,7 +1,7 @@
 import { createContext, useContext, useState, useCallback } from "react";
 import type { ReactNode } from "react";
 import { ME } from "./data";
-import type { UserProfile } from "./data";
+import type { UserProfile, Car } from "./data";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,6 +39,7 @@ type StoreProfile = Pick<UserProfile, "handle" | "avatar" | "status" | "car">;
 type StreetGridStore = {
   profile:        StoreProfile;
   updateProfile:  (patch: Partial<StoreProfile>) => void;
+  updateCar:      (car: Car) => void;
   settings:       Settings;
   updateSettings: (patch: Partial<Settings>) => void;
   chatInjections: ChatInjection[];
@@ -76,6 +77,10 @@ export function StreetGridProvider({ children }: { children: ReactNode }) {
     setProfile((p) => ({ ...p, ...patch }));
   }, []);
 
+  const updateCar = useCallback((car: Car) => {
+    setProfile((p) => ({ ...p, car }));
+  }, []);
+
   const updateSettings = useCallback((patch: Partial<Settings>) => {
     setSettings((s) => ({ ...s, ...patch }));
   }, []);
@@ -86,7 +91,7 @@ export function StreetGridProvider({ children }: { children: ReactNode }) {
 
   return (
     <StreetGridContext.Provider
-      value={{ profile, updateProfile, settings, updateSettings, chatInjections, pushChat }}
+      value={{ profile, updateProfile, updateCar, settings, updateSettings, chatInjections, pushChat }}
     >
       {children}
     </StreetGridContext.Provider>

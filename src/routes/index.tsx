@@ -40,22 +40,37 @@ function App() {
 
   return (
     <StreetGridProvider>
-      <div className="min-h-screen flex flex-col">
-        <Header />
-        <CitySelector value={city} onChange={setCity} />
-        <main className="flex-1">
-          {tab === "map" && <MapView city={city} onOpenGarage={openGarage} focusSpot={focusSpot} routeRequest={routeRequest} />}
-          {tab === "meets" && <MeetsPanel city={city} onRouteTo={routeTo} />}
-          {tab === "garage" && (
-            <GaragePanel
-              viewUserId={viewUser}
-              onBack={viewUser ? () => { setViewUser(null); setTab("map"); } : undefined}
-            />
-          )}
-          {tab === "routes" && <RoutesPanel />}
-          {tab === "spots" && <SpotsPanel city={city} onSelectSpot={focusSpotOnMap} onRouteTo={routeTo} />}
-          {tab === "chat" && <ChatPanel city={city} />}
-        </main>
+      <div className="relative min-h-dvh bg-background">
+        {tab === "map" && (
+          <div className="fixed inset-0 z-0">
+            <MapView city={city} onOpenGarage={openGarage} focusSpot={focusSpot} routeRequest={routeRequest} />
+          </div>
+        )}
+
+        <div className={tab === "map" ? "relative z-20 pointer-events-none" : "relative z-20"}>
+          <div className="pointer-events-auto">
+            <Header />
+          </div>
+          <div className="pointer-events-auto">
+            <CitySelector value={city} onChange={setCity} />
+          </div>
+        </div>
+
+        {tab !== "map" && (
+          <main className="relative z-10 flex-1">
+            {tab === "meets" && <MeetsPanel city={city} onRouteTo={routeTo} />}
+            {tab === "garage" && (
+              <GaragePanel
+                viewUserId={viewUser}
+                onBack={viewUser ? () => { setViewUser(null); setTab("map"); } : undefined}
+              />
+            )}
+            {tab === "routes" && <RoutesPanel />}
+            {tab === "spots" && <SpotsPanel city={city} onSelectSpot={focusSpotOnMap} onRouteTo={routeTo} />}
+            {tab === "chat" && <ChatPanel city={city} />}
+          </main>
+        )}
+
         <TabBar active={tab} onChange={(id) => { if (id !== "garage") setViewUser(null); setTab(id); }} />
       </div>
     </StreetGridProvider>
