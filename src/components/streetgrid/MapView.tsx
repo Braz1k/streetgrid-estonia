@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import {
   USERS, SPOTS, MEETS, ME, getCity,
   type SosSignal, type Spot, type SpotType, type CityId,
@@ -22,18 +24,16 @@ const toLngLat = ([lat, lng]: [number, number]): [number, number] => [lng, lat];
 const ROUTE_GLOW = "#00f0ff";
 const ROUTE_LINE = "#00ffff";
 
-// ─── Waze camera constants ────────────────────────────────────────────────────
+// ─── Waze camera constants ─────────────────────────────────────────────────────
 //
-// PADDING MATH (Mapbox): center_y = top + (H − top − bottom) / 2
-//   top:350, H=800 → 350 + (800-350)/2 = 575px from top ≈ 72 % ✓  (car in bottom third)
-//   bottom:280 →  (800-280)/2 = 260px from top ≈ 32 % ✗  (car in top third)
-// → top:350 is the only way to get the car at the bottom third.
+// pitch:60  zoom:16.5  padding.top:410  → car sits firmly in the lower third,
+// road ahead fills the upper two-thirds — matches reference images exactly.
 //
-const WAZE_ZOOM    = 15;
-const WAZE_PITCH   = 65;   // strong 3D tilt; matched by CSS rotateX on the car marker
-const WAZE_PADDING = { top: 350, bottom: 0, left: 0, right: 0 } as const;
+const WAZE_ZOOM    = 16.5;
+const WAZE_PITCH   = 60;
+const WAZE_PADDING = { top: 410, bottom: 0, left: 0, right: 0 } as const;
 
-// ─── Garage cars ──────────────────────────────────────────────────────────────
+// ─── Garage cars ───────────────────────────────────────────────────────────────
 
 type GarageCar = {
   id: string;
@@ -42,13 +42,30 @@ type GarageCar = {
   shortName: string;
   description: string;
   color: string;
+  modelPath: string; // path to .glb in /public; procedural fallback used if missing
 };
 
 const GARAGE_CARS: GarageCar[] = [
-  { id: "bmw_m3",      emoji: "🚗",  name: "BMW M3 E92",      shortName: "BMW M3",  description: "480 л.с. · Stage 2 Tune · KW V3",           color: "#0af"    },
-  { id: "tesla_neon",  emoji: "⚡",   name: "Tesla Neon X",    shortName: "Tesla",   description: "Электрогонщик · Silent Mode · 0–100 в 2.4 с", color: "#00ff88" },
-  { id: "retro_racer", emoji: "🏎️",  name: "Retro Racer '69", shortName: "Ретро",   description: "Muscle Car · 1969 · V8 Big Block",             color: "#ffcc00" },
-  { id: "hippie_van",  emoji: "🚐",   name: "Hippie Van",      shortName: "Хиппи",   description: "Peace & Love · Slow & Groovy",                 color: "#ff6600" },
+  {
+    id: "bmw_m3", emoji: "🚗", name: "BMW M3 Competition", shortName: "BMW M3",
+    description: "480 л.с. · Stage 2 Tune · KW V3", color: "#00aaff",
+    modelPath: "/models/bmw_m3.glb",
+  },
+  {
+    id: "tesla_neon", emoji: "⚡", name: "Tesla Neon X", shortName: "Tesla",
+    description: "Электрогонщик · Silent Mode · 0–100 в 2.4 с", color: "#00ff88",
+    modelPath: "/models/tesla_neon.glb",
+  },
+  {
+    id: "retro_racer", emoji: "🏎️", name: "Retro Racer '69", shortName: "Ретро",
+    description: "Muscle Car · 1969 · V8 Big Block", color: "#ffcc00",
+    modelPath: "/models/retro_racer.glb",
+  },
+  {
+    id: "hippie_van", emoji: "🚐", name: "Hippie Van", shortName: "Хиппи",
+    description: "Peace & Love · Slow & Groovy", color: "#ff6600",
+    modelPath: "/models/hippie_van.glb",
+  },
 ];
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -97,45 +114,332 @@ function userRole(id: string): MarkerRole {
 const routeBtnHtml = (id: string) =>
   `<button data-route="${id}" style="margin-top:6px;background:#00f0ff;color:#001;padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px">🧭 ПОЕХАЛИ</button>`;
 
-// ─── Marker helpers ───────────────────────────────────────────────────────────
+// ─── Procedural 3D car (fallback when .glb is not present) ────────────────────
+//
+// Car front = +Z axis.  Each car ID produces a DIFFERENT body shape.
+// Common materials are shared; addWheels() helper stamps 4 wheels+rims.
+//
+function createProceduralCar(carId: string, colorHex: string): THREE.Group {
+  const group  = new THREE.Group();
+  const color  = new THREE.Color(colorHex);
+  const bodyM  = new THREE.MeshPhongMaterial({ color, shininess: 130, specular: new THREE.Color(0x445566) });
+  const glassM = new THREE.MeshPhongMaterial({ color: 0x88aacc, transparent: true, opacity: 0.65, shininess: 220 });
+  const darkM  = new THREE.MeshPhongMaterial({ color: 0x111122 });
+  const wheelM = new THREE.MeshPhongMaterial({ color: 0x222233 });
+  const rimM   = new THREE.MeshPhongMaterial({ color: 0xbbbbcc, shininess: 200 });
+  const hlM    = new THREE.MeshPhongMaterial({ color: 0xffffaa, emissive: new THREE.Color(0xffff44), emissiveIntensity: 0.9 });
+  const tlM    = new THREE.MeshPhongMaterial({ color: 0xff2222, emissive: new THREE.Color(0xff0000), emissiveIntensity: 0.7 });
 
-/**
- * Waze-style CSS 3D car marker.
- *
- * The `perspective` parent gives depth context.
- * The inner `.waze-car-plate` applies `rotateX(65deg)` so the flat icon lies
- * flush on the pitched map surface (pitch 65° ≡ rotateX 65°).
- * The map's own `bearing` rotates the scene so the car always faces forward —
- * no need for a separate rotateZ here.
- */
-function makeWazeCarEl(emoji: string, color: string): HTMLDivElement {
-  const outer = document.createElement("div");
-  outer.style.cssText = [
-    "perspective:300px;",
-    "width:72px;height:72px;",
-    "display:flex;align-items:flex-end;justify-content:center;",
-    "padding-bottom:6px;",
-  ].join("");
+  // Stamp 4 wheels at ±trackW, ±wb/2, height yW
+  const addWheels = (trackW: number, wb: number, r: number, yW: number) => {
+    const wGeo = new THREE.CylinderGeometry(r, r, 0.22, 20);
+    const rGeo = new THREE.CylinderGeometry(r * 0.56, r * 0.56, 0.24, 10);
+    for (const [wx, wz] of [[trackW, wb/2], [trackW, -wb/2], [-trackW, wb/2], [-trackW, -wb/2]] as [number,number][]) {
+      const w = new THREE.Mesh(wGeo, wheelM); w.rotation.z = Math.PI / 2; w.position.set(wx, yW, wz); group.add(w);
+      const ri = new THREE.Mesh(rGeo, rimM);  ri.rotation.z = Math.PI / 2; ri.position.set(wx, yW, wz); group.add(ri);
+    }
+  };
 
-  const plate = document.createElement("div");
-  plate.className = "waze-car-plate";
-  plate.style.cssText = [
-    "width:56px;height:56px;border-radius:12px;",
-    "transform:rotateX(65deg);",
-    "transform-style:preserve-3d;",
-    "will-change:transform;",
-    "display:flex;align-items:center;justify-content:center;",
-    "font-size:28px;line-height:1;",
-    "background:rgba(4,8,22,0.93);",
-    `border:3px solid ${color};`,
-    `box-shadow:0 0 22px ${color}dd,0 0 44px ${color}66,inset 0 0 10px ${color}22;`,
-    "transition:border-color 0.25s,box-shadow 0.25s;",
-  ].join("");
-  plate.textContent = emoji;
+  // ── hippie_van ── tall boxy van ─────────────────────────────────────────────
+  if (carId === "hippie_van") {
+    // Main box — tall, wide, long
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.15, 2.3, 5.4), bodyM);
+    body.position.y = 1.25;
+    group.add(body);
+    // Large windshield
+    const wsh = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.0, 0.09), glassM);
+    wsh.position.set(0, 1.95, 2.72); group.add(wsh);
+    // Side windows (two rows)
+    for (const sx of [-1.09, 1.09]) {
+      const w1 = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.72, 1.4), glassM);
+      w1.position.set(sx, 1.9, 0.9); group.add(w1);
+      const w2 = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.68, 0.95), glassM);
+      w2.position.set(sx, 1.85, -0.75); group.add(w2);
+    }
+    // Rear window
+    const rw = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.85, 0.08), glassM);
+    rw.position.set(0, 1.85, -2.72); group.add(rw);
+    // Headlights
+    for (const sx of [0.72, -0.72]) {
+      const h = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.24, 0.13), hlM);
+      h.position.set(sx, 1.05, 2.78); group.add(h);
+    }
+    // Taillights
+    for (const sx of [0.72, -0.72]) {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.2, 0.11), tlM);
+      t.position.set(sx, 1.05, -2.78); group.add(t);
+    }
+    // Grille
+    const gr = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.42, 0.11), darkM);
+    gr.position.set(0, 0.65, 2.78); group.add(gr);
+    addWheels(1.12, 3.1, 0.44, 0.44);
 
-  outer.appendChild(plate);
-  return outer;
+  // ── retro_racer ── low racing bolide with wings ─────────────────────────────
+  } else if (carId === "retro_racer") {
+    // Ultra-low body
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.36, 4.7), bodyM);
+    body.position.y = 0.3; group.add(body);
+    // Nose
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.26, 1.1), bodyM);
+    nose.position.set(0, 0.26, 2.9); group.add(nose);
+    // Open cockpit
+    const cockpit = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.44, 1.45), bodyM);
+    cockpit.position.set(0, 0.7, -0.25); group.add(cockpit);
+    // Tiny windscreen
+    const ws = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.28, 0.07), glassM);
+    ws.position.set(0, 0.86, 0.45); ws.rotation.x = 0.62; group.add(ws);
+    // Front wing — wide flat slab
+    const fw = new THREE.Mesh(new THREE.BoxGeometry(3.3, 0.09, 0.72), bodyM);
+    fw.position.set(0, 0.2, 2.65); group.add(fw);
+    for (const sx of [1.65, -1.65]) { // front end-plates
+      const ep = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.33, 0.72), bodyM);
+      ep.position.set(sx, 0.33, 2.65); group.add(ep);
+    }
+    // Rear wing main + pillars + end-plates
+    const rw = new THREE.Mesh(new THREE.BoxGeometry(2.65, 0.1, 0.58), bodyM);
+    rw.position.set(0, 1.06, -2.3); group.add(rw);
+    for (const sx of [0.9, -0.9]) {
+      const rp = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.54, 0.13), bodyM);
+      rp.position.set(sx, 0.8, -2.3); group.add(rp);
+    }
+    for (const sx of [1.35, -1.35]) {
+      const ep = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.56, 0.58), bodyM);
+      ep.position.set(sx, 0.8, -2.3); group.add(ep);
+    }
+    // Diffuser
+    const diff = new THREE.Mesh(new THREE.BoxGeometry(1.85, 0.24, 0.52), darkM);
+    diff.position.set(0, 0.13, -2.76); group.add(diff);
+    // Exhaust pipes (chrome)
+    const chrome = new THREE.MeshPhongMaterial({ color: 0xddddee, shininess: 300 });
+    for (const sx of [0.36, -0.36]) {
+      const ex = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.62, 10), chrome);
+      ex.rotation.x = Math.PI / 2; ex.position.set(sx, 0.42, -2.6); group.add(ex);
+    }
+    // Headlights
+    for (const sx of [0.38, -0.38]) {
+      const h = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.14, 0.11), hlM);
+      h.position.set(sx, 0.38, 2.38); group.add(h);
+    }
+    // Taillights
+    for (const sx of [0.38, -0.38]) {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.12, 0.09), tlM);
+      t.position.set(sx, 0.38, -2.38); group.add(t);
+    }
+    addWheels(1.12, 2.85, 0.37, 0.37);
+
+  // ── tesla_neon ── sleek fastback with neon underglow ────────────────────────
+  } else if (carId === "tesla_neon") {
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.58, 4.2), bodyM);
+    hull.position.y = 0.44; group.add(hull);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.62, 2.35), bodyM);
+    cabin.position.set(0, 1.06, -0.18); group.add(cabin);
+    // Panoramic windshield
+    const wsh = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.56, 0.09), glassM);
+    wsh.position.set(0, 1.08, 1.0); wsh.rotation.x = 0.36; group.add(wsh);
+    // Sloping fastback rear glass
+    const rg = new THREE.Mesh(new THREE.BoxGeometry(1.52, 0.62, 0.09), glassM);
+    rg.position.set(0, 1.04, -1.44); rg.rotation.x = -0.54; group.add(rg);
+    // Side windows
+    for (const sx of [-0.88, 0.88]) {
+      const w = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.48, 1.9), glassM);
+      w.position.set(sx, 1.16, -0.2); group.add(w);
+    }
+    // Neon underglow strip (emissive with car color)
+    const glowM = new THREE.MeshPhongMaterial({ color, emissive: color, emissiveIntensity: 1.4 });
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(1.92, 0.07, 4.22), glowM);
+    strip.position.y = 0.09; group.add(strip);
+    // Blade headlights (Tesla-style thin bar)
+    const bladeM = new THREE.MeshPhongMaterial({ color: 0xeeeeff, emissive: new THREE.Color(0xaaaaff), emissiveIntensity: 1.1 });
+    const hl = new THREE.Mesh(new THREE.BoxGeometry(1.62, 0.07, 0.13), bladeM);
+    hl.position.set(0, 0.66, 2.12); group.add(hl);
+    // Taillights
+    for (const sx of [0.6, -0.6]) {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.13, 0.1), tlM);
+      t.position.set(sx, 0.54, -2.12); group.add(t);
+    }
+    addWheels(1.01, 2.72, 0.35, 0.35);
+
+  // ── bmw_m3 (default) ── classic sport sedan ─────────────────────────────────
+  } else {
+    const hull = new THREE.Mesh(new THREE.BoxGeometry(1.95, 0.62, 4.1), bodyM);
+    hull.position.y = 0.46; group.add(hull);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.76, 2.05), bodyM);
+    cabin.position.set(0, 1.18, -0.1); group.add(cabin);
+    const wsh = new THREE.Mesh(new THREE.BoxGeometry(1.48, 0.6, 0.07), glassM);
+    wsh.position.set(0, 1.14, 0.9); wsh.rotation.x = 0.45; group.add(wsh);
+    const rg = new THREE.Mesh(new THREE.BoxGeometry(1.48, 0.56, 0.07), glassM);
+    rg.position.set(0, 1.12, -1.2); rg.rotation.x = -0.38; group.add(rg);
+    for (const sx of [-0.9, 0.9]) {
+      const w = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 1.68), glassM);
+      w.position.set(sx, 1.22, -0.1); group.add(w);
+    }
+    // Twin kidney grille (BMW signature)
+    for (const gx of [0.32, -0.32]) {
+      const kg = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.3, 0.1), darkM);
+      kg.position.set(gx, 0.52, 2.1); group.add(kg);
+    }
+    // M-badge stripe (accent)
+    const stripeM = new THREE.MeshPhongMaterial({ color: new THREE.Color(colorHex), emissive: color, emissiveIntensity: 0.3 });
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.06, 4.12), stripeM);
+    stripe.position.y = 0.78; group.add(stripe);
+    // Headlights
+    for (const sx of [0.58, -0.58]) {
+      const h = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.17, 0.11), hlM);
+      h.position.set(sx, 0.56, 2.1); group.add(h);
+    }
+    // Taillights
+    for (const sx of [0.58, -0.58]) {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.15, 0.1), tlM);
+      t.position.set(sx, 0.56, -2.1); group.add(t);
+    }
+    addWheels(1.04, 2.84, 0.35, 0.35);
+  }
+
+  return group;
 }
+
+// ─── Three.js Custom Layer ─────────────────────────────────────────────────────
+//
+// Implements Mapbox CustomLayerInterface.
+// renderingMode:'3d' composites correctly with 3D buildings.
+//
+// Rotation math (heading in degrees, clockwise from north):
+//   rotateX(π/2)  → stands Y-up model on the map surface
+//   rotateY(θ)    → θ = heading*π/180 turns the car to face the heading direction
+//   proof: front vector (0,0,1) → rotateY(θ) → (sinθ, 0, cosθ)
+//          → rotateX(π/2) → (sinθ, -cosθ, 0)
+//          → scale(s,-s,s) → (sinθ·s, cosθ·s, 0)  [mercator +X=east, +Y=north]
+//          θ=0  → (0, s, 0)  = north ✓
+//          θ=π/2→ (s, 0, 0)  = east  ✓
+//
+class CarLayer {
+  readonly id            = "user-car-3d";
+  readonly type          = "custom" as const;
+  readonly renderingMode = "3d"     as const;
+
+  private _map!:          mapboxgl.Map;
+  private renderer!:      THREE.WebGLRenderer;
+  private scene!:         THREE.Scene;
+  private camera!:        THREE.Camera;
+  private carGroup!:      THREE.Group;
+  private smoothHeading = 0;
+  private currentCarId:   string;
+
+  private readonly cars:       GarageCar[];
+  private readonly posRef:     { current: [number, number] };
+  private readonly headingRef: { current: number };
+
+  constructor(
+    initialCarId: string,
+    cars:         GarageCar[],
+    posRef:       { current: [number, number] },
+    headingRef:   { current: number },
+  ) {
+    this.currentCarId = initialCarId;
+    this.cars         = cars;
+    this.posRef       = posRef;
+    this.headingRef   = headingRef;
+  }
+
+  onAdd(map: mapboxgl.Map, gl: WebGLRenderingContext) {
+    this._map = map;
+
+    // Share Mapbox's WebGL context — autoClear must be false
+    this.renderer = new THREE.WebGLRenderer({
+      canvas:    map.getCanvas() as HTMLCanvasElement,
+      context:   gl as unknown as WebGL2RenderingContext,
+      antialias: true,
+    });
+    this.renderer.autoClear        = false;
+    this.renderer.shadowMap.enabled = false;
+
+    this.scene  = new THREE.Scene();
+    this.camera = new THREE.Camera();
+
+    // Lighting
+    const ambient = new THREE.AmbientLight(0xffffff, 1.1);
+    this.scene.add(ambient);
+    const sun = new THREE.DirectionalLight(0xffffff, 2.8);
+    sun.position.set(100, 80, 60);
+    this.scene.add(sun);
+    const fill = new THREE.DirectionalLight(0x6688ff, 0.9);
+    fill.position.set(-80, 60, -60);
+    this.scene.add(fill);
+
+    this.carGroup = new THREE.Group();
+    this.scene.add(this.carGroup);
+
+    this.loadCar(this.currentCarId);
+  }
+
+  private getCar(id: string): GarageCar {
+    return this.cars.find(c => c.id === id) ?? this.cars[0];
+  }
+
+  loadCar(carId: string) {
+    this.currentCarId = carId;
+    const car         = this.getCar(carId);
+    const loader      = new GLTFLoader();
+
+    loader.load(
+      car.modelPath,
+      (gltf) => {
+        this.carGroup.clear();
+        const model = gltf.scene;
+        // Normalise GLTF model to ~4 m length
+        const box  = new THREE.Box3().setFromObject(model);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) model.scale.setScalar(4 / maxDim);
+        this.carGroup.add(model);
+        this._map.triggerRepaint();
+      },
+      undefined,
+      () => {
+        // .glb not found → procedural fallback (always available)
+        this.carGroup.clear();
+        this.carGroup.add(createProceduralCar(car.id, car.color));
+        this._map.triggerRepaint();
+      },
+    );
+  }
+
+  swapCar(carId: string) {
+    if (carId !== this.currentCarId) this.loadCar(carId);
+  }
+
+  render(_gl: WebGLRenderingContext, matrix: number[]) {
+    // Smooth heading interpolation — Waze-style gradual turn
+    const dh          = ((this.headingRef.current - this.smoothHeading + 540) % 360) - 180;
+    this.smoothHeading = (this.smoothHeading + dh * 0.12 + 360) % 360;
+
+    const [lat, lng] = this.posRef.current;
+    const mercator   = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
+    const s          = mercator.meterInMercatorCoordinateUnits();
+
+    const headingRad  = (this.smoothHeading * Math.PI) / 180;
+    const modelMatrix = new THREE.Matrix4()
+      .makeTranslation(mercator.x, mercator.y, mercator.z)
+      .scale(new THREE.Vector3(s, -s, s))
+      .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))
+      .multiply(new THREE.Matrix4().makeRotationY(headingRad));
+
+    this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix).multiply(modelMatrix);
+
+    this.renderer.resetState();
+    this.renderer.render(this.scene, this.camera);
+    this._map.triggerRepaint(); // continuous repaint drives smooth heading lerp
+  }
+
+  onRemove() {
+    this.carGroup.clear();
+    this.scene.clear();
+    // Don't dispose the renderer — it shares Mapbox's GL context
+  }
+}
+
+// ─── HTML marker helpers ──────────────────────────────────────────────────────
 
 function makeMarkerEl(
   html: string, role: MarkerRole, size = 36,
@@ -197,12 +501,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const botMarkersRef        = useRef<mapboxgl.Marker[]>([]);
   const sosMarkersRef        = useRef<mapboxgl.Marker[]>([]);
   const spotRenderCleanupRef = useRef<(() => void) | null>(null);
-  // Live-update the car marker plate without recreating the whole marker
-  const carPlateRef          = useRef<HTMLDivElement | null>(null);
-  // Heading tracking — kept in refs to avoid stale closures in watchPosition
+  // 3D car layer — created in map.on('load'), swapped on garage selection
+  const carLayerRef          = useRef<CarLayer | null>(null);
+  // GPS position updated in watchPosition; read each frame by CarLayer.render
+  const carPositionRef       = useRef<[number, number]>(ME.location);
+  // Heading tracking — kept in refs to avoid stale closures
   const headingRef           = useRef<number>(0);
   const prevPosRef           = useRef<[number, number] | null>(null);
-  const selectedCarIdRef     = useRef<string>(GARAGE_CARS[0].id);
 
   const [ready,         setReady]         = useState(false);
   const [sosOpen,       setSosOpen]       = useState(false);
@@ -222,19 +527,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const visibleMeets = city === "all" ? MEETS : MEETS.filter((m) => m.city === city);
   const selectedCar  = GARAGE_CARS.find((c) => c.id === selectedCarId) ?? GARAGE_CARS[0];
 
-  // Keep ref in sync so watchPosition callback reads the latest value
-  useEffect(() => { selectedCarIdRef.current = selectedCarId; }, [selectedCarId]);
-
-  // ── Live car plate update — no marker recreation needed ──────────────────────
+  // ── Garage selection → swap 3D model ─────────────────────────────────────────
   useEffect(() => {
-    const plate = carPlateRef.current;
-    if (!plate) return;
-    plate.textContent = selectedCar.emoji;
-    plate.style.borderColor = selectedCar.color;
-    plate.style.boxShadow   = `0 0 22px ${selectedCar.color}dd,0 0 44px ${selectedCar.color}66,inset 0 0 10px ${selectedCar.color}22`;
-  }, [selectedCarId, selectedCar.emoji, selectedCar.color]);
+    carLayerRef.current?.swapCar(selectedCarId);
+  }, [selectedCarId, ready]);
 
-  // ── Init map ────────────────────────────────────────────────────────────────
+  // ── Init map ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
@@ -243,27 +541,24 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       style:              "mapbox://styles/mapbox/dark-v11",
       center:             toLngLat(ME.location),
       zoom:               WAZE_ZOOM,
-      pitch:              WAZE_PITCH,   // hard-set at init
+      pitch:              WAZE_PITCH,
       bearing:            0,
       antialias:          true,
       attributionControl: false,
     });
 
     map.on("load", () => {
-      // ── Apply Waze viewport padding immediately ────────────────────────────
-      // MUST be called after load; padding persists across camera moves.
+      // Waze camera padding — persists across all camera moves
       map.setPadding(WAZE_PADDING);
 
-      // ── Re-enforce pitch/padding whenever Mapbox tries to reset them ───────
-      // Some SDK versions reset pitch to 0 on certain interactions;
-      // this guard ensures Waze perspective is always restored.
+      // Re-enforce pitch if user pinch-zooms it away
       map.on("pitchend", () => {
         if (map.getPitch() < WAZE_PITCH - 5) {
           map.easeTo({ pitch: WAZE_PITCH, duration: 400 });
         }
       });
 
-      // ── 3-D buildings ──────────────────────────────────────────────────────
+      // 3-D buildings
       try {
         const styleLayers = map.getStyle().layers ?? [];
         const labelLayer  = styleLayers.find(
@@ -282,9 +577,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           },
           labelLayer?.id,
         );
-      } catch { /* style not yet available */ }
+      } catch { /* style not yet fully loaded */ }
 
-      // ── Label visibility ───────────────────────────────────────────────────
+      // Label visibility
       const FORCE_VISIBLE = ["road-label", "settlement-label", "settlement-subdivision-label", "water-label"];
       map.getStyle().layers?.forEach((l) => {
         if (l.id.includes("poi")) {
@@ -294,7 +589,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         }
       });
 
-      // ── Route source + layers ──────────────────────────────────────────────
+      // Route source + layers
       map.addSource("sg-route", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -310,12 +605,19 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         paint: { "line-color": ROUTE_LINE, "line-width": 5.5, "line-opacity": 1 },
       });
 
-      // ── Spot clustering source ─────────────────────────────────────────────
+      // Spot clustering source
       map.addSource("spots", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
         cluster: true, clusterMaxZoom: 14, clusterRadius: 50,
       });
+
+      // ── 3D car layer (Three.js custom layer) ───────────────────────────────
+      const layer = new CarLayer(
+        GARAGE_CARS[0].id, GARAGE_CARS, carPositionRef, headingRef,
+      );
+      carLayerRef.current = layer;
+      map.addLayer(layer as unknown as mapboxgl.CustomLayerInterface);
 
       setReady(true);
     });
@@ -323,16 +625,20 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     map.touchPitch.enable();
     mapRef.current = map;
 
-    return () => { map.remove(); mapRef.current = null; };
+    return () => {
+      map.remove();
+      mapRef.current    = null;
+      carLayerRef.current = null;
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Geolocation watchPosition: updates heading + rotates map bearing ─────────
+  // ── Geolocation: GPS position + heading → 3D layer + camera ──────────────────
   //
-  // The map BEARING is set to the user's heading so the road ahead is always
-  // "up" on screen, exactly like Waze. The CSS rotateX(65deg) on the car
-  // marker aligns it with the pitched map surface — no additional rotateZ
-  // needed because the bearing handles orientation.
+  // carPositionRef is read every frame by CarLayer.render (no React re-render needed).
+  // headingRef drives smooth rotation inside the Three.js render loop.
+  // easeTo follows the user with Waze bearing-lock; padding keeps the model
+  // in the lower third at all times.
   //
   useEffect(() => {
     if (!navigator.geolocation) return;
@@ -353,32 +659,39 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         }
         prevPosRef.current = [latitude, longitude];
 
-        if (h != null && !isNaN(h)) {
-          headingRef.current = h;
+        // Update position ref — CarLayer.render reads this every frame
+        carPositionRef.current = [latitude, longitude];
 
-          // Smoothly rotate the map to match heading — this is the Waze "bearing lock"
-          mapRef.current?.easeTo({
-            bearing:  h,
-            pitch:    WAZE_PITCH,      // re-enforce pitch on every heading update
-            duration: 600,
-          });
-        }
+        // Only update heading when we have a valid value
+        if (h != null && !isNaN(h)) headingRef.current = h;
+
+        // ALWAYS lock camera on GPS position, regardless of heading availability.
+        // This is the critical Waze-lock: heading=null in browsers, but the
+        // position follow must still work. padding + zoom are re-enforced here
+        // so manual pan/zoom is overridden on the next GPS tick.
+        mapRef.current?.easeTo({
+          center:   [longitude, latitude],
+          zoom:     WAZE_ZOOM,
+          bearing:  headingRef.current,
+          pitch:    WAZE_PITCH,
+          padding:  WAZE_PADDING,
+          duration: 1000,
+        });
       },
-      () => { /* geolocation denied — heading stays 0, pitch stays WAZE_PITCH */ },
+      () => { /* geolocation denied — position stays at ME.location */ },
       { enableHighAccuracy: true, maximumAge: 400 },
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, []); // mount-only; all live values read via refs
+  }, []); // mount-only; live values via refs
 
-  // ── Fly to city / Waze mode on tab switch ────────────────────────────────────
+  // ── Fly to city / Waze mode on tab switch ─────────────────────────────────────
   useEffect(() => {
     if (!ready) return;
     const map = mapRef.current;
     if (!map) return;
 
     if (city === "tallinn" || city === "all") {
-      // Waze mode — car at bottom, road ahead fills top, bearing = heading
       map.setPadding(WAZE_PADDING);
       map.flyTo({
         center:   toLngLat(ME.location),
@@ -389,7 +702,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         essential: true,
       });
     } else {
-      // City overview — flat look, no bottom-third offset
       map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
       map.flyTo({
         center:   toLngLat(cityObj.coords),
@@ -402,7 +714,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     }
   }, [city, ready, cityObj.coords, cityObj.zoom]);
 
-  // ── Bots simulation ─────────────────────────────────────────────────────────
+  // ── Bots simulation ───────────────────────────────────────────────────────────
   useEffect(() => {
     const base = cityObj.coords;
     const r    = city === "all" ? 0.5 : 0.012;
@@ -436,7 +748,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     return () => { clearInterval(tick); clearInterval(patrolTick); };
   }, [city, cityObj.coords]);
 
-  // ── Route drawing ────────────────────────────────────────────────────────────
+  // ── Route drawing ─────────────────────────────────────────────────────────────
   const setRouteGeoJson = useCallback((geometry: GeoJSON.LineString | null) => {
     (mapRef.current?.getSource("sg-route") as mapboxgl.GeoJSONSource | undefined)?.setData({
       type: "FeatureCollection",
@@ -478,29 +790,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const clearRoute   = useCallback(() => { setRouteGeoJson(null); setActiveRoute(null); }, [setRouteGeoJson]);
   const triggerRoute = useCallback((c: [number, number], n: string) => runRouteTo(c, n), [runRouteTo]);
 
-  // ── Feature markers ──────────────────────────────────────────────────────────
+  // ── Feature markers (other users + meets) ────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
 
     featureMarkersRef.current.forEach((m) => m.remove());
     featureMarkersRef.current = [];
-    carPlateRef.current = null;
-
-    // ME — CSS 3D car marker
-    if (city === "tallinn" || city === "all") {
-      const el = makeWazeCarEl(selectedCar.emoji, selectedCar.color);
-      // Store reference to inner plate for live colour/emoji updates
-      carPlateRef.current = el.querySelector(".waze-car-plate") as HTMLDivElement | null;
-
-      const m = new mapboxgl.Marker({ element: el, anchor: "bottom" })
-        .setLngLat(toLngLat(ME.location))
-        .setPopup(new mapboxgl.Popup({ offset: 18 }).setHTML(
-          `<b>${profile.handle}</b><br/>${selectedCar.name}`,
-        ))
-        .addTo(map);
-      featureMarkersRef.current.push(m);
-    }
 
     // Other users
     if (layers.users && (city === "tallinn" || city === "all")) {
@@ -537,9 +833,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layers.users, layers.meets, ready, city, visibleMeets.length, onOpenGarage, profile.handle, profile.status, triggerRoute, selectedCarId]);
+  }, [layers.users, layers.meets, ready, city, visibleMeets.length, onOpenGarage, profile.handle, triggerRoute]);
 
-  // ── Spots: GeoJSON clustering + dynamic HTML markers ───────────────────────
+  // ── Spots: GeoJSON clustering + dynamic HTML markers ─────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -637,7 +933,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.spots, ready, city, visibleSpots, triggerRoute]);
 
-  // ── Bot markers ──────────────────────────────────────────────────────────────
+  // ── Bot markers ───────────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -656,7 +952,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     });
   }, [bots, layers.users, settings.showBots, settings.showPatrols, ready]);
 
-  // ── SOS markers ──────────────────────────────────────────────────────────────
+  // ── SOS markers ───────────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -677,13 +973,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     });
   }, [signals, ready, triggerRoute]);
 
-  // ── Focus spot ───────────────────────────────────────────────────────────────
+  // ── Focus spot ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!focusSpot || !ready) return;
     const target = [...SPOTS, ...userSpots].find((s) => s.id === focusSpot.id);
     if (!target) return;
     mapRef.current?.flyTo({
-      center: toLngLat(target.coords), zoom: 16,
+      center: toLngLat(target.coords), zoom: WAZE_ZOOM,
       pitch: WAZE_PITCH, bearing: headingRef.current,
       duration: 1600, essential: true,
     });
@@ -693,7 +989,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     }, 1200);
   }, [focusSpot, ready, userSpots]);
 
-  // ── External route request ───────────────────────────────────────────────────
+  // ── External route request ─────────────────────────────────────────────────
   useEffect(() => {
     if (!routeRequest || !ready) return;
     runRouteTo(routeRequest.coords, routeRequest.name);
@@ -714,7 +1010,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     });
   };
 
-  // ── SOS submit ───────────────────────────────────────────────────────────────
+  // ── SOS submit ────────────────────────────────────────────────────────────────
   const handleSosSubmit = ({ preset, label, note, coords }: SosPayload) => {
     const time = new Date().toLocaleTimeString("ru", { hour: "2-digit", minute: "2-digit" });
     const sig: SosSignal = {
@@ -723,7 +1019,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     };
     setSignals((s) => [...s, sig]);
     setTimeout(() => mapRef.current?.flyTo({
-      center: toLngLat(coords), zoom: 16,
+      center: toLngLat(coords), zoom: WAZE_ZOOM,
       pitch: WAZE_PITCH, bearing: headingRef.current,
       duration: 1200, essential: true,
     }), 100);
@@ -736,7 +1032,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     setSosOpen(false);
   };
 
-  // ── Add spot ─────────────────────────────────────────────────────────────────
+  // ── Add spot ──────────────────────────────────────────────────────────────────
   const handleAddSpot = (data: { type: SpotType; name: string; description: string }) => {
     const center = mapRef.current?.getCenter();
     const coords: [number, number] = center ? [center.lat, center.lng] : cityObj.coords;
@@ -750,7 +1046,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     setAddOpen(false);
   };
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
+  // ─── Render ───────────────────────────────────────────────────────────────────
   return (
     <div className="relative sg-map-wrap h-full">
       <div ref={containerRef} className="sg-map h-full w-full" />
@@ -801,7 +1097,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         </button>
       </div>
 
-      {/* ── Bottom Waze bar (above tab bar) ── */}
+      {/* ── Bottom Waze bar ── */}
       <div className="absolute bottom-[62px] left-0 right-0 z-[600] flex flex-col gap-2 px-3">
 
         {/* Row 1 – Plus · Car pill · SOS */}
@@ -827,7 +1123,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             <span className="text-xl shrink-0 leading-none">{selectedCar.emoji}</span>
             <div className="min-w-0 flex-1 text-left">
               <div className="text-[9px] text-muted-foreground leading-none tracking-wider uppercase">
-                CSS 3D · pitch {WAZE_PITCH}°
+                3D Model · pitch {WAZE_PITCH}°
               </div>
               <div className="text-xs font-bold truncate mt-0.5">{selectedCar.name}</div>
             </div>
@@ -873,7 +1169,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
               <div>
                 <h3 className="text-sm font-bold tracking-wider uppercase">Гараж</h3>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Выбери машину — маркер на карте обновится мгновенно
+                  Выбери машину — 3D-модель на карте обновится мгновенно
                 </p>
               </div>
               <button
@@ -894,12 +1190,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                     active ? "border" : "glass border border-white/5 hover:border-white/15"
                   }`}
                   style={active ? {
-                    background:   `${car.color}18`,
-                    borderColor:  `${car.color}55`,
-                    boxShadow:    `0 0 18px ${car.color}1a`,
+                    background:  `${car.color}18`,
+                    borderColor: `${car.color}55`,
+                    boxShadow:   `0 0 18px ${car.color}1a`,
                   } : {}}
                 >
-                  {/* Preview: CSS 3D mini card */}
+                  {/* 3D perspective preview */}
                   <div
                     className="shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-2xl"
                     style={{
@@ -915,7 +1211,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                     <div className="text-sm font-bold">{car.name}</div>
                     <div className="text-[11px] text-muted-foreground mt-0.5">{car.description}</div>
                     <div className="text-[10px] mt-1" style={{ color: `${car.color}bb` }}>
-                      CSS 3D · rotateX({WAZE_PITCH}°) · bearing-lock
+                      Three.js 3D · GLTF + процедурный фоллбек
                     </div>
                   </div>
                   {active && (
@@ -965,7 +1261,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       onClick={() => {
                         setSearchOpen(false);
                         mapRef.current?.flyTo({
-                          center: toLngLat(spot.coords), zoom: 16,
+                          center: toLngLat(spot.coords), zoom: WAZE_ZOOM,
                           pitch: WAZE_PITCH, bearing: headingRef.current,
                           duration: 1600, essential: true,
                         });
@@ -996,7 +1292,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       onClick={() => {
                         setSearchOpen(false);
                         mapRef.current?.flyTo({
-                          center: toLngLat(mt.coords), zoom: 15,
+                          center: toLngLat(mt.coords), zoom: WAZE_ZOOM,
                           pitch: WAZE_PITCH, bearing: headingRef.current,
                           duration: 1600, essential: true,
                         });
