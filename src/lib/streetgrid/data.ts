@@ -12,11 +12,11 @@ export type City = {
 };
 
 export const CITIES: City[] = [
-  { id: "all", name: "Вся Эстония", short: "EST", coords: [58.8, 25.5], zoom: 7 },
-  { id: "tallinn", name: "Таллинн", short: "TLN", coords: [59.437, 24.7536], zoom: 12 },
-  { id: "tartu", name: "Тарту", short: "TRT", coords: [58.378, 26.729], zoom: 12 },
-  { id: "parnu", name: "Пярну", short: "PNU", coords: [58.385, 24.497], zoom: 13 },
-  { id: "narva", name: "Нарва", short: "NRV", coords: [59.379, 28.196], zoom: 13 },
+  { id: "all", name: "Вся Эстония", short: "EST", coords: [58.8, 25.5], zoom: 7.2 },
+  { id: "tallinn", name: "Таллинн", short: "TLN", coords: [59.437, 24.7536], zoom: 11.8 },
+  { id: "tartu", name: "Тарту", short: "TRT", coords: [58.378, 26.729], zoom: 11.8 },
+  { id: "parnu", name: "Пярну", short: "PNU", coords: [58.385, 24.497], zoom: 11.8 },
+  { id: "narva", name: "Нарва", short: "NRV", coords: [59.379, 28.196], zoom: 11.8 },
 ];
 
 export const getCity = (id: CityId) => CITIES.find((c) => c.id === id) ?? CITIES[0];

@@ -14,8 +14,8 @@ const TABS: { id: TabId; label: string; icon: typeof Map }[] = [
 
 export function TabBar({ active, onChange }: { active: TabId; onChange: (id: TabId) => void }) {
   return (
-    <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 z-50 w-full max-w-[480px] glass-strong border-t border-white/5">
-      <div className="grid grid-cols-6 px-1 pt-1.5 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+    <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 z-50 w-full max-w-[480px] glass-strong border-t border-white/[0.06] backdrop-blur-xl">
+      <div className="grid grid-cols-6 px-0.5 pt-1 pb-[max(0.4rem,env(safe-area-inset-bottom))]">
         {TABS.map((t) => {
           const Icon = t.icon;
           const isActive = active === t.id;
@@ -24,15 +24,31 @@ export function TabBar({ active, onChange }: { active: TabId; onChange: (id: Tab
               key={t.id}
               onClick={() => onChange(t.id)}
               className={cn(
-                "flex flex-col items-center gap-1 py-1.5 rounded-lg transition-all relative",
-                isActive ? "text-primary" : "text-muted-foreground hover:text-foreground/80"
+                "sg-tab-btn flex flex-col items-center gap-0.5 py-1 rounded-lg transition-all relative",
+                isActive ? "sg-tab-btn--active" : "sg-tab-btn--idle",
               )}
             >
-              {isActive && (
-                <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 h-0.5 w-8 rounded-full bg-primary glow-red" />
-              )}
-              <Icon className={cn("h-4 w-4 transition-transform", isActive && "scale-110")} />
-              <span className="text-[9px] font-bold tracking-wider">{t.label}</span>
+              <Icon
+                className={cn(
+                  "h-4 w-4 transition-all",
+                  isActive
+                    ? "text-white stroke-white"
+                    : "text-muted-foreground/55 stroke-muted-foreground/55 fill-none",
+                )}
+                strokeWidth={isActive ? 2 : 1.25}
+                fill={isActive ? "currentColor" : "none"}
+                fillOpacity={isActive ? 0.15 : 0}
+              />
+              <span
+                className={cn(
+                  "text-[8px] font-bold tracking-wider leading-none",
+                  isActive
+                    ? "text-white drop-shadow-[0_0_10px_rgba(255,0,85,0.5)]"
+                    : "text-muted-foreground/50",
+                )}
+              >
+                {isActive ? "◉" : "○"} {t.label}
+              </span>
             </button>
           );
         })}

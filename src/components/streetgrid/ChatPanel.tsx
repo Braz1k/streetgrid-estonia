@@ -47,7 +47,7 @@ export function ChatPanel({ city }: { city: CityId }) {
   const cityName = getCity(city).name;
 
   return (
-    <div className="flex flex-col h-[calc(100vh-260px)] pb-24">
+    <div className="flex flex-col h-[calc(100vh-210px)] pb-24">
       <div className="px-4 pt-4 pb-2 border-b border-white/5">
         <h2 className="font-display text-lg font-black">ЧАТ · {cityName.toUpperCase()}</h2>
         <p className="text-[10px] text-muted-foreground tracking-widest mt-0.5">● {city === "all" ? 612 : 234} ONLINE</p>

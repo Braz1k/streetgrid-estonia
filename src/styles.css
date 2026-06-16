@@ -146,14 +146,20 @@
 .animate-pulse-ring { animation: pulse-ring 1.8s cubic-bezier(0.4,0,0.6,1) infinite; }
 .animate-float-up { animation: float-up 0.35s ease-out; }
 
+/* Futuristic tab bar */
+.sg-tab-btn--active {
+  filter: drop-shadow(0 0 8px rgba(255, 0, 85, 0.35));
+}
+.sg-tab-btn--idle:hover {
+  color: oklch(0.75 0 0 / 0.7);
+}
+
 /* Mapbox dark neon theme */
 .sg-map-wrap .mapboxgl-canvas { outline: none; }
-.sg-map-wrap .mapboxgl-ctrl-attrib {
-  background: rgba(7,7,15,0.75) !important;
-  color: #888 !important;
-  font-size: 9px !important;
-}
-.sg-map-wrap .mapboxgl-ctrl-attrib a { color: #aaa !important; }
+/* Hide Mapbox logo, attribution badge and zoom/compass controls */
+.mapboxgl-ctrl-logo,
+.mapboxgl-ctrl-attrib,
+.mapboxgl-ctrl-group { display: none !important; }
 .sg-map-wrap .mapboxgl-popup-content {
   background: rgba(15,15,25,0.95) !important;
   color: #fff !important;
@@ -170,36 +176,44 @@
   font-size: 18px !important;
   padding: 2px 8px !important;
 }
-.sg-map-wrap .mapboxgl-ctrl-group {
-  background: rgba(15,15,25,0.85) !important;
-  border: 1px solid rgba(255,255,255,0.1) !important;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-}
-.sg-map-wrap .mapboxgl-ctrl-group button {
-  background-color: transparent !important;
-}
-.sg-map-wrap .mapboxgl-ctrl-group button .mapboxgl-ctrl-icon {
-  filter: invert(1) brightness(1.4);
-}
-.sg-map-wrap .mapboxgl-ctrl-bottom-right {
-  right: 5.5rem !important;
-  bottom: 0.5rem !important;
-}
 
 /* Custom marker styles */
+.sg-marker-wrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.sg-marker-wrap > .sg-marker { pointer-events: auto; }
+
+.sg-marker-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--pulse-color, #ff6600);
+  opacity: 0.55;
+  animation: sg-marker-radar 2.4s ease-out infinite;
+  pointer-events: none;
+}
+.sg-marker-pulse-ring--delay { animation-delay: 1.2s; }
+
+@keyframes sg-marker-radar {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  100% { transform: scale(1.45); opacity: 0; }
+}
+
 .sg-marker {
+  position: relative;
+  z-index: 1;
   display: grid;
   place-items: center;
   width: 36px; height: 36px;
   border-radius: 50%;
   font-size: 18px;
   background: rgba(15,15,25,0.9);
-  border: 2px solid var(--cyber-red);
-  box-shadow: 0 0 12px oklch(0.65 0.24 25 / 0.6);
+  border: 2px solid rgba(255,255,255,0.25);
 }
-.sg-marker.cyan { border-color: oklch(0.82 0.16 210); box-shadow: 0 0 12px oklch(0.82 0.16 210 / 0.6); }
-.sg-marker.nitro { border-color: oklch(0.82 0.22 145); box-shadow: 0 0 12px oklch(0.82 0.22 145 / 0.6); }
-.sg-marker.sos { animation: sos-blink 0.9s ease-in-out infinite; border-color: #ff1f1f; }
+.sg-marker--sos { animation: sos-blink 0.9s ease-in-out infinite; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
