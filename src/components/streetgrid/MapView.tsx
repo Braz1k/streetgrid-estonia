@@ -569,8 +569,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // Becomes true once the first GPS coordinate has been received.
   const [hasInitialPosition, setHasInitialPosition] = useState(false);
   // Latest GPS snapshot — drives the reactive camera effect.
-  // accuracy (metres) lets the camera effect reject coarse IP/WiFi positions.
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number; accuracy: number } | null>(null);
+  // Only set from watchPosition when accuracy ≤ 1000 m (real device GPS/WiFi).
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number } | null>(null);
   // Set to true around programmatic easeTo/flyTo calls so zoomstart/pitchstart
   // listeners don't incorrectly disable follow mode during our own animations.
   const isProgrammaticRef = useRef(false);
@@ -593,9 +593,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const map = new mapboxgl.Map({
       container:          containerRef.current,
       style:              "mapbox://styles/mapbox/dark-v11",
-      center:             toLngLat(ME.location),
-      zoom:               WAZE_ZOOM,
-      pitch:              WAZE_PITCH,
+      center:             [0, 0], // neutral — GPS jumpTo overrides on first real fix
+      zoom:               2,
+      pitch:              0,
       bearing:            0,
       antialias:          true,
       attributionControl: false,
@@ -782,10 +782,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         carPositionRef.current = [latitude, longitude];
         if (h != null && !isNaN(h)) headingRef.current = h;
 
-        // Publish to React state — triggers the reactive camera effect.
-        // accuracy is included so the camera effect can reject coarse IP/WiFi
-        // positions that Safari returns immediately before the true GPS lock.
-        setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current, accuracy: pos.coords.accuracy });
+        // Only publish to React state when the fix is accurate enough to trust
+        // (≤ 1000 m rejects IP-based guesses; accepts WiFi and GPS).
+        // carPositionRef is always updated above so the 3D car never freezes.
+        if (pos.coords.accuracy <= 1000) {
+          setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current });
+        }
       },
       () => { /* geolocation denied — car stays at ME.location */ },
       { enableHighAccuracy: true, maximumAge: 400 },
@@ -814,11 +816,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [userCoords.lng, userCoords.lat] }, properties: {} });
 
     // 2. First GPS fix — snap the map to the user's real location.
-    // Safari (and some Android browsers) fire watchPosition immediately with a
-    // coarse IP/WiFi estimate (accuracy > 500 m).  We ignore those and wait for
-    // a true device-sensor fix before locking the camera and setting hasInitialPosition.
+    // userCoords is only set from watchPosition when accuracy ≤ 1000 m, so any
+    // value here is already a trustworthy device fix.
     if (!hasInitialPosition) {
-      if (userCoords.accuracy > 500) return; // too coarse — wait for real GPS
       setHasInitialPosition(true);
       setIsFollowing(true);
       isProgrammaticRef.current = true;
@@ -855,17 +855,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (!map) return;
 
     if (city === "tallinn" || city === "all") {
+      // For Tallinn/all the GPS reactive effect owns the camera position.
+      // Only restore the Waze padding so the car stays in the lower third.
+      // (Formerly flew to ME.location which fired zoomstart without the
+      //  isProgrammaticRef guard, silently killing follow mode on every load.)
       map.setPadding(WAZE_PADDING);
-      map.flyTo({
-        center:   toLngLat(ME.location),
-        zoom:     WAZE_ZOOM,
-        pitch:    WAZE_PITCH,
-        bearing:  headingRef.current,
-        duration: 2000,
-        essential: true,
-      });
     } else {
+      // Other cities: fly to overview. Guard with isProgrammaticRef so
+      // zoomstart doesn't accidentally flip isFollowing off.
       map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
+      isProgrammaticRef.current = true;
       map.flyTo({
         center:   toLngLat(cityObj.coords),
         zoom:     cityObj.zoom,
@@ -874,6 +873,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         duration: 2000,
         essential: true,
       });
+      isProgrammaticRef.current = false;
     }
   }, [city, ready, cityObj.coords, cityObj.zoom]);
 
@@ -1221,6 +1221,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   return (
     <div className="relative sg-map-wrap h-full">
       <div ref={containerRef} className="sg-map h-full w-full" />
+
+      {/* GPS acquiring overlay — covers the neutral world-map until first real fix */}
+      {!hasInitialPosition && (
+        <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-[#0e1015]">
+          <div className="text-center">
+            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-700 border-t-cyan-400 mx-auto" />
+            <p className="text-sm font-medium text-gray-400">Поиск спутников GPS…</p>
+          </div>
+        </div>
+      )}
 
       {/* ── Navigation overlay ── */}
       {activeRoute && (
