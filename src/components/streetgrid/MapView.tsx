@@ -21,8 +21,8 @@ mapboxgl.accessToken =
 // app stores [lat, lng]; Mapbox expects [lng, lat]
 const toLngLat = ([lat, lng]: [number, number]): [number, number] => [lng, lat];
 
-const ROUTE_GLOW = "#00f0ff";
-const ROUTE_LINE = "#00ffff";
+const ROUTE_GLOW = "#00f3ff";
+const ROUTE_LINE = "#00f3ff";
 
 // ─── Waze camera constants ─────────────────────────────────────────────────────
 //
@@ -412,15 +412,15 @@ class CarLayer {
 
   // ── Zoom-adaptive helpers ─────────────────────────────────────────────────
 
-  // Scale multiplier — mirrors the model-scale breakpoints the user sees.
-  // At zoom 14 the model is 6× its normalised 4 m size (=24 m, very visible
-  // on city overview); shrinks to real-car proportions by zoom 19.
+  // Scale multiplier applied on top of meterInMercatorCoordinateUnits().
+  // All breakpoints are 3× the previous values so the car is clearly visible
+  // on the road at every zoom level.
   private _getZoomScale(zoom: number): number {
-    if (zoom <= 14) return 6.0;
-    if (zoom <= 16) return 6.0 + (zoom - 14) / 2 * (2.5 - 6.0); // lerp 6.0→2.5
-    if (zoom <= 18) return 2.5 + (zoom - 16) / 2 * (0.8 - 2.5); // lerp 2.5→0.8
-    if (zoom <= 19) return 0.8 + (zoom - 18) / 1 * (0.4 - 0.8); // lerp 0.8→0.4
-    return 0.4;
+    if (zoom <= 14) return 18.0;
+    if (zoom <= 16) return 18.0 + (zoom - 14) / 2 * (7.5 - 18.0); // lerp 18.0→7.5
+    if (zoom <= 18) return 7.5  + (zoom - 16) / 2 * (2.4 - 7.5);  // lerp 7.5→2.4
+    if (zoom <= 19) return 2.4  + (zoom - 18) / 1 * (1.2 - 2.4);  // lerp 2.4→1.2
+    return 1.2;
   }
 
   // 3D model fades in zoom 14.8 → 15.2 (mirrors circle fade-out below).
@@ -657,12 +657,18 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       map.addLayer({
         id: "sg-route-glow", type: "line", source: "sg-route",
         layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": ROUTE_GLOW, "line-width": 14, "line-opacity": 0.35, "line-blur": 5 },
+        paint: { "line-color": ROUTE_GLOW, "line-width": 18, "line-opacity": 0.4, "line-blur": 6 },
       });
       map.addLayer({
         id: "sg-route-line", type: "line", source: "sg-route",
         layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": ROUTE_LINE, "line-width": 5.5, "line-opacity": 1 },
+        paint: {
+          "line-color":             ROUTE_LINE,
+          "line-width":             6,
+          "line-opacity":           1,
+          // Makes the line self-illuminate in dark style + respect 3-D perspective at high pitch
+          "line-emissive-strength": 1.0,
+        } as any,
       });
 
       // Spot clustering source
@@ -787,11 +793,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         if (isFollowingRef.current) {
           mapRef.current?.easeTo({
             center:   [longitude, latitude],
-            zoom:     WAZE_ZOOM,
+            zoom:     18.0,
             bearing:  headingRef.current,
-            pitch:    WAZE_PITCH,
+            pitch:    65,
             padding:  WAZE_PADDING,
-            duration: 1000,
+            duration: 800,
+            essential: true,
           });
         }
       },
