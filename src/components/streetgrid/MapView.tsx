@@ -328,6 +328,7 @@ class CarLayer {
   private readonly cars:       GarageCar[];
   private readonly posRef:     { current: [number, number] };
   private readonly headingRef: { current: number };
+  private _lastOpacity = -1; // cached so material traversal only runs when opacity changes
 
   constructor(
     initialCarId: string,
@@ -409,14 +410,57 @@ class CarLayer {
     if (carId !== this.currentCarId) this.loadCar(carId);
   }
 
+  // ── Zoom-adaptive helpers ─────────────────────────────────────────────────
+
+  // Scale multiplier — mirrors the model-scale breakpoints the user sees.
+  // At zoom 14 the model is 6× its normalised 4 m size (=24 m, very visible
+  // on city overview); shrinks to real-car proportions by zoom 19.
+  private _getZoomScale(zoom: number): number {
+    if (zoom <= 14) return 6.0;
+    if (zoom <= 16) return 6.0 + (zoom - 14) / 2 * (2.5 - 6.0); // lerp 6.0→2.5
+    if (zoom <= 18) return 2.5 + (zoom - 16) / 2 * (0.8 - 2.5); // lerp 2.5→0.8
+    if (zoom <= 19) return 0.8 + (zoom - 18) / 1 * (0.4 - 0.8); // lerp 0.8→0.4
+    return 0.4;
+  }
+
+  // 3D model fades in zoom 14.5 → 15.5 (mirrors circle fade-out below).
+  // Below 14.5: invisible — circle marker has full responsibility.
+  // Above 15.5: fully opaque — circle has finished fading out.
+  private _getZoomOpacity(zoom: number): number {
+    if (zoom <= 14.5) return 0.0;
+    if (zoom >= 15.5) return 1.0;
+    return zoom - 14.5; // linear 0→1 across the 1-zoom-level window
+  }
+
   render(_gl: WebGLRenderingContext, matrix: number[]) {
+    const zoom    = this._map.getZoom();
+    const opacity = this._getZoomOpacity(zoom);
+
+    // Apply opacity to Three.js materials — guarded by delta check so we don't
+    // traverse the entire mesh tree every frame when opacity is stable.
+    if (Math.abs(opacity - this._lastOpacity) > 0.005) {
+      this._lastOpacity = opacity;
+      this.carGroup.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          const mats = Array.isArray((obj as THREE.Mesh).material)
+            ? ((obj as THREE.Mesh).material as THREE.Material[])
+            : [(obj as THREE.Mesh).material as THREE.Material];
+          mats.forEach((m) => { m.opacity = opacity; m.transparent = opacity < 1.0; });
+        }
+      });
+    }
+
+    // Circle marker takes over below zoom 15 — skip WebGL draw entirely.
+    if (opacity <= 0.0) return;
+
     // Smooth heading interpolation — Waze-style gradual turn
     const dh          = ((this.headingRef.current - this.smoothHeading + 540) % 360) - 180;
     this.smoothHeading = (this.smoothHeading + dh * 0.12 + 360) % 360;
 
     const [lat, lng] = this.posRef.current;
     const mercator   = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
-    const s          = mercator.meterInMercatorCoordinateUnits();
+    const rawS       = mercator.meterInMercatorCoordinateUnits();
+    const s          = rawS * this._getZoomScale(zoom); // zoom-compensated scale
 
     const headingRad  = (this.smoothHeading * Math.PI) / 180;
     const modelMatrix = new THREE.Matrix4()
@@ -520,6 +564,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [selectedCarId, setSelectedCarId] = useState<string>(GARAGE_CARS[0].id);
   const [carSheetOpen,  setCarSheetOpen]  = useState(false);
   const [searchOpen,    setSearchOpen]    = useState(false);
+  // Follow mode — when true the camera locks onto the user's GPS position.
+  // Gesture interactions (drag / zoom / pitch) flip this to false so the user
+  // can freely explore the map. Tapping the crosshair button restores it.
+  const [isFollowingUser, setIsFollowingUser] = useState(true);
+  // Ref mirror so mount-only closures (watchPosition, map event handlers)
+  // always read the latest value without stale-closure bugs.
+  const isFollowingRef = useRef(true);
 
   const cityObj      = getCity(city);
   const allSpots     = [...SPOTS, ...userSpots];
@@ -566,6 +617,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           map.easeTo({ pitch: WAZE_PITCH, duration: 400 });
         }
       });
+
+      // Disable camera follow mode on any manual gesture so the user can
+      // freely explore the map without being snapped back to GPS position.
+      const disableFollow = () => {
+        isFollowingRef.current = false;
+        setIsFollowingUser(false);
+      };
+      map.on("dragstart",  disableFollow);
+      map.on("zoomstart",  disableFollow);
+      map.on("pitchstart", disableFollow);
 
       // 3-D buildings
       try {
@@ -621,6 +682,47 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         cluster: true, clusterMaxZoom: 14, clusterRadius: 50,
       });
 
+      // ── User position source + far-zoom circle marker ────────────────────────
+      //
+      // A lightweight GeoJSON Point source that is updated on every GPS fix
+      // (see watchPosition below).  The circle layer is visible at zoom < 16
+      // and fades out exactly as the 3D model fades in (zoom 15→16), so the
+      // user is always visible whether they're zoomed out or in navigation mode.
+      //
+      map.addSource("user-position-source", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: toLngLat(ME.location) },
+          properties: {},
+        },
+      });
+
+      map.addLayer({
+        id:     "user-avatar-far-layer",
+        type:   "circle",
+        source: "user-position-source",
+        paint: {
+          "circle-radius":          17,
+          "circle-color":           "#ff0055",
+          "circle-stroke-width":    3,
+          "circle-stroke-color":    "#ffffff",
+          // Keep the dot upright in viewport space so it doesn't stretch at pitch
+          "circle-pitch-alignment": "viewport",
+          // Mirror the 3D model's fade-in: circle disappears zoom 14.5 → 15.5
+          "circle-opacity": [
+            "interpolate", ["linear"], ["zoom"],
+            14.5, 1.0,
+            15.5, 0.0,
+          ] as any,
+          "circle-stroke-opacity": [
+            "interpolate", ["linear"], ["zoom"],
+            14.5, 1.0,
+            15.5, 0.0,
+          ] as any,
+        } as any,
+      });
+
       // ── 3D car layer (Three.js custom layer) ───────────────────────────────
       const layer = new CarLayer(
         GARAGE_CARS[0].id, GARAGE_CARS, carPositionRef, headingRef,
@@ -671,21 +773,26 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         // Update position ref — CarLayer.render reads this every frame
         carPositionRef.current = [latitude, longitude];
 
+        // Keep the far-zoom circle marker in sync with GPS position
+        (mapRef.current?.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
+          ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [longitude, latitude] }, properties: {} });
+
         // Only update heading when we have a valid value
         if (h != null && !isNaN(h)) headingRef.current = h;
 
-        // ALWAYS lock camera on GPS position, regardless of heading availability.
-        // This is the critical Waze-lock: heading=null in browsers, but the
-        // position follow must still work. padding + zoom are re-enforced here
-        // so manual pan/zoom is overridden on the next GPS tick.
-        mapRef.current?.easeTo({
-          center:   [longitude, latitude],
-          zoom:     WAZE_ZOOM,
-          bearing:  headingRef.current,
-          pitch:    WAZE_PITCH,
-          padding:  WAZE_PADDING,
-          duration: 1000,
-        });
+        // Follow camera only when the user has not manually panned/zoomed away.
+        // isFollowingRef is written synchronously by gesture listeners and the
+        // recenter button, so it is always up-to-date inside this closure.
+        if (isFollowingRef.current) {
+          mapRef.current?.easeTo({
+            center:   [longitude, latitude],
+            zoom:     WAZE_ZOOM,
+            bearing:  headingRef.current,
+            pitch:    WAZE_PITCH,
+            padding:  WAZE_PADDING,
+            duration: 1000,
+          });
+        }
       },
       () => { /* geolocation denied — position stays at ME.location */ },
       { enableHighAccuracy: true, maximumAge: 400 },
@@ -1008,9 +1115,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const recenter = () => {
     const map = mapRef.current;
     if (!map) return;
+    // Re-enable camera follow BEFORE the flyTo so the next GPS tick also
+    // stays locked. Write the ref synchronously; the state update schedules
+    // a React re-render for the button visual.
+    isFollowingRef.current = true;
+    setIsFollowingUser(true);
     map.setPadding(WAZE_PADDING);
+    // Fly to the live GPS position, not the static initial location
+    const [lat, lng] = carPositionRef.current;
     map.flyTo({
-      center:   toLngLat(ME.location),
+      center:   [lng, lat],
       zoom:     WAZE_ZOOM,
       pitch:    WAZE_PITCH,
       bearing:  headingRef.current,
@@ -1100,7 +1214,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         <button
           onClick={recenter}
           title="Вернуться к машине"
-          className="h-9 w-9 grid place-items-center rounded-xl glass-strong text-accent/70 hover:text-accent transition"
+          className={`h-9 w-9 grid place-items-center rounded-xl glass-strong transition ${
+            isFollowingUser ? "text-accent" : "text-muted-foreground/50 hover:text-accent"
+          }`}
         >
           <Crosshair className="h-4 w-4" />
         </button>
