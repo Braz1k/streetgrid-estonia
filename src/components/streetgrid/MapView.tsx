@@ -423,13 +423,13 @@ class CarLayer {
     return 0.4;
   }
 
-  // 3D model fades in zoom 14.5 → 15.5 (mirrors circle fade-out below).
-  // Below 14.5: invisible — circle marker has full responsibility.
-  // Above 15.5: fully opaque — circle has finished fading out.
+  // 3D model fades in zoom 14.8 → 15.2 (mirrors circle fade-out below).
+  // Below 14.8: invisible — circle marker has full responsibility.
+  // Above 15.2: fully opaque — circle has finished fading out.
   private _getZoomOpacity(zoom: number): number {
-    if (zoom <= 14.5) return 0.0;
-    if (zoom >= 15.5) return 1.0;
-    return zoom - 14.5; // linear 0→1 across the 1-zoom-level window
+    if (zoom <= 14.8) return 0.0;
+    if (zoom >= 15.2) return 1.0;
+    return (zoom - 14.8) / 0.4; // linear 0→1 across the 0.4-zoom window
   }
 
   render(_gl: WebGLRenderingContext, matrix: number[]) {
@@ -567,7 +567,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // Follow mode — when true the camera locks onto the user's GPS position.
   // Gesture interactions (drag / zoom / pitch) flip this to false so the user
   // can freely explore the map. Tapping the crosshair button restores it.
-  const [isFollowingUser, setIsFollowingUser] = useState(true);
+  const [isFollowing, setIsFollowing] = useState(true);
   // Ref mirror so mount-only closures (watchPosition, map event handlers)
   // always read the latest value without stale-closure bugs.
   const isFollowingRef = useRef(true);
@@ -617,16 +617,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           map.easeTo({ pitch: WAZE_PITCH, duration: 400 });
         }
       });
-
-      // Disable camera follow mode on any manual gesture so the user can
-      // freely explore the map without being snapped back to GPS position.
-      const disableFollow = () => {
-        isFollowingRef.current = false;
-        setIsFollowingUser(false);
-      };
-      map.on("dragstart",  disableFollow);
-      map.on("zoomstart",  disableFollow);
-      map.on("pitchstart", disableFollow);
 
       // 3-D buildings
       try {
@@ -703,22 +693,22 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         type:   "circle",
         source: "user-position-source",
         paint: {
-          "circle-radius":          17,
+          "circle-radius":          14,
           "circle-color":           "#ff0055",
-          "circle-stroke-width":    3,
+          "circle-stroke-width":    2,
           "circle-stroke-color":    "#ffffff",
           // Keep the dot upright in viewport space so it doesn't stretch at pitch
           "circle-pitch-alignment": "viewport",
-          // Mirror the 3D model's fade-in: circle disappears zoom 14.5 → 15.5
+          // Mirror the 3D model's fade-in: circle disappears zoom 14.8 → 15.2
           "circle-opacity": [
             "interpolate", ["linear"], ["zoom"],
-            14.5, 1.0,
-            15.5, 0.0,
+            14.8, 1.0,
+            15.2, 0.0,
           ] as any,
           "circle-stroke-opacity": [
             "interpolate", ["linear"], ["zoom"],
-            14.5, 1.0,
-            15.5, 0.0,
+            14.8, 1.0,
+            15.2, 0.0,
           ] as any,
         } as any,
       });
@@ -731,6 +721,17 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       map.addLayer(layer as unknown as mapboxgl.CustomLayerInterface);
 
       setReady(true);
+    });
+
+    // Detect user-initiated map movements (touch / mouse) via originalEvent.
+    // Programmatic moves (easeTo / flyTo) have no originalEvent, so they won't
+    // accidentally turn off follow mode.  Guard with the ref so setIsFollowing is
+    // only called once per gesture, not on every animation frame.
+    map.on("move", (e) => {
+      if ((e as mapboxgl.MapMouseEvent).originalEvent && isFollowingRef.current) {
+        isFollowingRef.current = false;
+        setIsFollowing(false);
+      }
     });
 
     map.touchPitch.enable();
@@ -1119,7 +1120,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     // stays locked. Write the ref synchronously; the state update schedules
     // a React re-render for the button visual.
     isFollowingRef.current = true;
-    setIsFollowingUser(true);
+    setIsFollowing(true);
     map.setPadding(WAZE_PADDING);
     // Fly to the live GPS position, not the static initial location
     const [lat, lng] = carPositionRef.current;
@@ -1215,7 +1216,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           onClick={recenter}
           title="Вернуться к машине"
           className={`h-9 w-9 grid place-items-center rounded-xl glass-strong transition ${
-            isFollowingUser ? "text-accent" : "text-muted-foreground/50 hover:text-accent"
+            isFollowing ? "text-accent" : "text-muted-foreground/50 hover:text-accent"
           }`}
         >
           <Crosshair className="h-4 w-4" />
