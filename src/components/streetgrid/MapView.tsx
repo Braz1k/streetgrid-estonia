@@ -413,14 +413,13 @@ class CarLayer {
   // ── Zoom-adaptive helpers ─────────────────────────────────────────────────
 
   // Scale multiplier applied on top of meterInMercatorCoordinateUnits().
-  // All breakpoints are 3× the previous values so the car is clearly visible
-  // on the road at every zoom level.
+  // 4× the original baseline so the car is wide and unmissable among 3D buildings.
   private _getZoomScale(zoom: number): number {
-    if (zoom <= 14) return 18.0;
-    if (zoom <= 16) return 18.0 + (zoom - 14) / 2 * (7.5 - 18.0); // lerp 18.0→7.5
-    if (zoom <= 18) return 7.5  + (zoom - 16) / 2 * (2.4 - 7.5);  // lerp 7.5→2.4
-    if (zoom <= 19) return 2.4  + (zoom - 18) / 1 * (1.2 - 2.4);  // lerp 2.4→1.2
-    return 1.2;
+    if (zoom <= 14) return 24.0;
+    if (zoom <= 16) return 24.0 + (zoom - 14) / 2 * (10.0 - 24.0); // lerp 24.0→10.0
+    if (zoom <= 18) return 10.0 + (zoom - 16) / 2 * (3.2 - 10.0);  // lerp 10.0→3.2
+    if (zoom <= 19) return 3.2  + (zoom - 18) / 1 * (1.6 - 3.2);   // lerp 3.2→1.6
+    return 1.6;
   }
 
   // 3D model fades in zoom 14.8 → 15.2 (mirrors circle fade-out below).
