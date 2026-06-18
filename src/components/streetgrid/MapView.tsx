@@ -569,7 +569,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // Becomes true once the first GPS coordinate has been received.
   const [hasInitialPosition, setHasInitialPosition] = useState(false);
   // Latest GPS snapshot — drives the reactive camera effect.
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number } | null>(null);
+  // accuracy (metres) lets the camera effect reject coarse IP/WiFi positions.
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number; accuracy: number } | null>(null);
   // Set to true around programmatic easeTo/flyTo calls so zoomstart/pitchstart
   // listeners don't incorrectly disable follow mode during our own animations.
   const isProgrammaticRef = useRef(false);
@@ -728,17 +729,18 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       carLayerRef.current = layer;
       map.addLayer(layer as unknown as mapboxgl.CustomLayerInterface);
 
-      // Disable camera follow on explicit user gestures.
-      // isProgrammaticRef guards zoomstart/pitchstart from firing during our
-      // own easeTo/flyTo calls (those also trigger these events synchronously).
-      const onUserGesture = () => { if (!isProgrammaticRef.current) setIsFollowing(false); };
-      map.on("dragstart",   onUserGesture);
-      map.on("zoomstart",   onUserGesture);
-      map.on("pitchstart",  onUserGesture);
-      map.on("rotatestart", onUserGesture);
-
       setReady(true);
     });
+
+    // Attach gesture listeners immediately after map creation — NOT inside
+    // map.on('load') — so touches that happen during style loading are caught too.
+    // isProgrammaticRef guards zoomstart/pitchstart from firing during our own
+    // easeTo/flyTo calls (Mapbox fires those events synchronously on programmatic moves).
+    const onUserGesture = () => { if (!isProgrammaticRef.current) setIsFollowing(false); };
+    map.on("dragstart",   onUserGesture);
+    map.on("zoomstart",   onUserGesture);
+    map.on("pitchstart",  onUserGesture);
+    map.on("rotatestart", onUserGesture);
 
     map.touchPitch.enable();
     mapRef.current = map;
@@ -780,8 +782,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         carPositionRef.current = [latitude, longitude];
         if (h != null && !isNaN(h)) headingRef.current = h;
 
-        // Publish to React state — triggers the reactive camera effect
-        setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current });
+        // Publish to React state — triggers the reactive camera effect.
+        // accuracy is included so the camera effect can reject coarse IP/WiFi
+        // positions that Safari returns immediately before the true GPS lock.
+        setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current, accuracy: pos.coords.accuracy });
       },
       () => { /* geolocation denied — car stays at ME.location */ },
       { enableHighAccuracy: true, maximumAge: 400 },
@@ -809,8 +813,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     (map.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
       ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [userCoords.lng, userCoords.lat] }, properties: {} });
 
-    // 2. First GPS fix — snap the map to the user's real location
+    // 2. First GPS fix — snap the map to the user's real location.
+    // Safari (and some Android browsers) fire watchPosition immediately with a
+    // coarse IP/WiFi estimate (accuracy > 500 m).  We ignore those and wait for
+    // a true device-sensor fix before locking the camera and setting hasInitialPosition.
     if (!hasInitialPosition) {
+      if (userCoords.accuracy > 500) return; // too coarse — wait for real GPS
       setHasInitialPosition(true);
       setIsFollowing(true);
       isProgrammaticRef.current = true;
