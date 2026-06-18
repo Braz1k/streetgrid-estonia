@@ -563,13 +563,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [selectedCarId, setSelectedCarId] = useState<string>(GARAGE_CARS[0].id);
   const [carSheetOpen,  setCarSheetOpen]  = useState(false);
   const [searchOpen,    setSearchOpen]    = useState(false);
-  // Follow mode — when true the camera locks onto the user's GPS position.
-  // Gesture interactions (drag / zoom / pitch) flip this to false so the user
-  // can freely explore the map. Tapping the crosshair button restores it.
-  const [isFollowing, setIsFollowing] = useState(true);
-  // Ref mirror so mount-only closures (watchPosition, map event handlers)
-  // always read the latest value without stale-closure bugs.
-  const isFollowingRef = useRef(true);
+  // Follow mode — false on load; turns true only after the first real GPS fix.
+  // Manual gestures flip it back to false. Crosshair button restores it.
+  const [isFollowing,       setIsFollowing]       = useState(false);
+  // Becomes true once the first GPS coordinate has been received.
+  const [hasInitialPosition, setHasInitialPosition] = useState(false);
+  // Latest GPS snapshot — drives the reactive camera effect.
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number } | null>(null);
+  // Set to true around programmatic easeTo/flyTo calls so zoomstart/pitchstart
+  // listeners don't incorrectly disable follow mode during our own animations.
+  const isProgrammaticRef = useRef(false);
 
   const cityObj      = getCity(city);
   const allSpots     = [...SPOTS, ...userSpots];
@@ -725,18 +728,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       carLayerRef.current = layer;
       map.addLayer(layer as unknown as mapboxgl.CustomLayerInterface);
 
-      setReady(true);
-    });
+      // Disable camera follow on explicit user gestures.
+      // isProgrammaticRef guards zoomstart/pitchstart from firing during our
+      // own easeTo/flyTo calls (those also trigger these events synchronously).
+      const onUserGesture = () => { if (!isProgrammaticRef.current) setIsFollowing(false); };
+      map.on("dragstart",   onUserGesture);
+      map.on("zoomstart",   onUserGesture);
+      map.on("pitchstart",  onUserGesture);
+      map.on("rotatestart", onUserGesture);
 
-    // Detect user-initiated map movements (touch / mouse) via originalEvent.
-    // Programmatic moves (easeTo / flyTo) have no originalEvent, so they won't
-    // accidentally turn off follow mode.  Guard with the ref so setIsFollowing is
-    // only called once per gesture, not on every animation frame.
-    map.on("move", (e) => {
-      if ((e as mapboxgl.MapMouseEvent).originalEvent && isFollowingRef.current) {
-        isFollowingRef.current = false;
-        setIsFollowing(false);
-      }
+      setReady(true);
     });
 
     map.touchPitch.enable();
@@ -750,12 +751,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Geolocation: GPS position + heading → 3D layer + camera ──────────────────
+  // ── Geolocation: raw GPS → refs + state ──────────────────────────────────────
   //
-  // carPositionRef is read every frame by CarLayer.render (no React re-render needed).
-  // headingRef drives smooth rotation inside the Three.js render loop.
-  // easeTo follows the user with Waze bearing-lock; padding keeps the model
-  // in the lower third at all times.
+  // This effect ONLY updates refs (for the Three.js render loop) and the
+  // userCoords state (which drives the reactive camera effect below).
+  // Camera movement is handled separately so it can react to isFollowing changes.
   //
   useEffect(() => {
     if (!navigator.geolocation) return;
@@ -776,37 +776,69 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         }
         prevPosRef.current = [latitude, longitude];
 
-        // Update position ref — CarLayer.render reads this every frame
+        // Keep Three.js refs current — CarLayer.render reads these every frame
         carPositionRef.current = [latitude, longitude];
-
-        // Keep the far-zoom circle marker in sync with GPS position
-        (mapRef.current?.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
-          ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [longitude, latitude] }, properties: {} });
-
-        // Only update heading when we have a valid value
         if (h != null && !isNaN(h)) headingRef.current = h;
 
-        // Follow camera only when the user has not manually panned/zoomed away.
-        // isFollowingRef is written synchronously by gesture listeners and the
-        // recenter button, so it is always up-to-date inside this closure.
-        if (isFollowingRef.current) {
-          mapRef.current?.easeTo({
-            center:   [longitude, latitude],
-            zoom:     18.0,
-            bearing:  headingRef.current,
-            pitch:    65,
-            padding:  WAZE_PADDING,
-            duration: 800,
-            essential: true,
-          });
-        }
+        // Publish to React state — triggers the reactive camera effect
+        setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current });
       },
-      () => { /* geolocation denied — position stays at ME.location */ },
+      () => { /* geolocation denied — car stays at ME.location */ },
       { enableHighAccuracy: true, maximumAge: 400 },
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, []); // mount-only; live values via refs
+  }, []); // mount-only; live values written via refs + setUserCoords
+
+  // ── Reactive camera + circle-marker effect ────────────────────────────────────
+  //
+  // Runs whenever userCoords, isFollowing, or hasInitialPosition changes.
+  // Responsibilities:
+  //   1. Always sync the far-zoom circle marker to the new position.
+  //   2. On the FIRST real GPS fix: jumpTo the user's location and enable following.
+  //   3. On subsequent fixes: if following, easeTo with 3D navigator settings.
+  //
+  // isProgrammaticRef is set true around easeTo/flyTo so that the synchronous
+  // zoomstart/pitchstart events they fire don't accidentally flip isFollowing=false.
+  //
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !userCoords) return;
+
+    // 1. Circle marker always tracks live position
+    (map.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
+      ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [userCoords.lng, userCoords.lat] }, properties: {} });
+
+    // 2. First GPS fix — snap the map to the user's real location
+    if (!hasInitialPosition) {
+      setHasInitialPosition(true);
+      setIsFollowing(true);
+      isProgrammaticRef.current = true;
+      map.jumpTo({
+        center:  [userCoords.lng, userCoords.lat],
+        zoom:    18.0,
+        pitch:   65,
+        bearing: userCoords.heading,
+      });
+      isProgrammaticRef.current = false;
+      return;
+    }
+
+    // 3. Subsequent fixes — smooth follow only when mode is active
+    if (isFollowing) {
+      isProgrammaticRef.current = true;
+      map.easeTo({
+        center:   [userCoords.lng, userCoords.lat],
+        zoom:     18.0,
+        pitch:    65,
+        bearing:  userCoords.heading,
+        padding:  WAZE_PADDING,
+        duration: 1000,
+        essential: true,
+      });
+      isProgrammaticRef.current = false;
+    }
+  }, [userCoords, isFollowing, hasInitialPosition]);
 
   // ── Fly to city / Waze mode on tab switch ─────────────────────────────────────
   useEffect(() => {
@@ -1123,22 +1155,22 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const recenter = () => {
     const map = mapRef.current;
     if (!map) return;
-    // Re-enable camera follow BEFORE the flyTo so the next GPS tick also
-    // stays locked. Write the ref synchronously; the state update schedules
-    // a React re-render for the button visual.
-    isFollowingRef.current = true;
+    // Re-enable follow mode — the reactive effect will pick up the next GPS tick
     setIsFollowing(true);
-    map.setPadding(WAZE_PADDING);
-    // Fly to the live GPS position, not the static initial location
+    // Immediate flyTo for instant responsiveness (don't wait for the next GPS tick).
+    // isProgrammaticRef prevents the synchronous zoomstart it fires from disabling follow.
     const [lat, lng] = carPositionRef.current;
+    isProgrammaticRef.current = true;
     map.flyTo({
-      center:   [lng, lat],
-      zoom:     WAZE_ZOOM,
-      pitch:    WAZE_PITCH,
-      bearing:  headingRef.current,
-      duration: 1500,
+      center:    [lng, lat],
+      zoom:      18.0,
+      pitch:     65,
+      bearing:   headingRef.current,
+      padding:   WAZE_PADDING,
+      duration:  1500,
       essential: true,
     });
+    isProgrammaticRef.current = false;
   };
 
   // ── SOS submit ────────────────────────────────────────────────────────────────
