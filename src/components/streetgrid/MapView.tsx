@@ -883,7 +883,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   }, []);
 
   const runRouteTo = useCallback(async (dest: [number, number], name: string) => {
-    const [oLng, oLat] = toLngLat(ME.location);
+    // Always start from the live GPS position, not the static spawn point
+    const [oLng, oLat] = toLngLat(carPositionRef.current);
     const [dLng, dLat] = toLngLat(dest);
     try {
       const url  = `https://router.project-osrm.org/route/v1/driving/${oLng},${oLat};${dLng},${dLat}?overview=full&geometries=geojson`;
