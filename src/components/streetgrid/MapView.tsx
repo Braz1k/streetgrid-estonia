@@ -49,7 +49,7 @@ const GARAGE_CARS: GarageCar[] = [
   {
     id: "bmw_m3", emoji: "🚗", name: "BMW M3 Competition", shortName: "BMW M3",
     description: "480 л.с. · Stage 2 Tune · KW V3", color: "#00aaff",
-    modelPath: "/models/bmw_m3.glb",
+    modelPath: "/models/low_poly_bmw_g80_m3.glb",
   },
   {
     id: "tesla_neon", emoji: "⚡", name: "Tesla Neon X", shortName: "Tesla",
@@ -548,6 +548,15 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     });
 
     map.on("load", () => {
+      // Pre-register the GLB asset with Mapbox's native model system (GL JS ≥ 3.0).
+      // Wrapped in try/catch so an absent file or unsupported API never crashes the map.
+      // The Three.js CarLayer below loads the same path independently via GLTFLoader.
+      try {
+        (map as any).addModel("user-car-model-g80", "/models/low_poly_bmw_g80_m3.glb");
+      } catch {
+        // addModel not available in this Mapbox version, or file not found — safe to ignore
+      }
+
       // Waze camera padding — persists across all camera moves
       map.setPadding(WAZE_PADDING);
 

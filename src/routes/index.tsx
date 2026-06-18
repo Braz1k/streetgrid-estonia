@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { Header } from "@/components/streetgrid/Header";
 import { CitySelector } from "@/components/streetgrid/CitySelector";
 import { TabBar, type TabId } from "@/components/streetgrid/TabBar";
@@ -17,6 +18,7 @@ export const Route = createFileRoute("/")({
 });
 
 function App() {
+  const isMobile = useIsMobile();
   const [tab, setTab] = useState<TabId>("map");
   const [city, setCity] = useState<CityId>("tallinn");
   const [viewUser, setViewUser] = useState<string | null>(null);
@@ -40,38 +42,54 @@ function App() {
 
   return (
     <StreetGridProvider>
-      <div className="relative min-h-dvh bg-background">
-        {tab === "map" && (
-          <div className="fixed inset-0 z-0">
-            <MapView city={city} onOpenGarage={openGarage} focusSpot={focusSpot} routeRequest={routeRequest} />
-          </div>
-        )}
+      {/* Full-width container — fills 100% of any screen, no side borders */}
+      <div style={{ minHeight: "100dvh", background: "#0a0b14" }}>
+        <div
+          style={{
+            position:   "relative",
+            width:      "100%",
+            height:     "100dvh",
+            overflow:   "hidden",
+            background: "#0a0b14",
+          }}
+        >
+          {/* Map lives absolutely inside the phone frame */}
+          {tab === "map" && (
+            <div style={{ position: "absolute", inset: 0, zIndex: 0 }}>
+              <MapView city={city} onOpenGarage={openGarage} focusSpot={focusSpot} routeRequest={routeRequest} />
+            </div>
+          )}
 
-        <div className={tab === "map" ? "relative z-20 pointer-events-none" : "relative z-20"}>
-          <div className="pointer-events-auto">
-            <Header />
+          {/* Header + city selector overlay */}
+          <div
+            style={{ position: "relative", zIndex: 20, pointerEvents: tab === "map" ? "none" : "auto" }}
+          >
+            <div style={{ pointerEvents: "auto" }}>
+              <Header />
+            </div>
+            <div style={{ pointerEvents: "auto" }}>
+              <CitySelector value={city} onChange={setCity} />
+            </div>
           </div>
-          <div className="pointer-events-auto">
-            <CitySelector value={city} onChange={setCity} />
-          </div>
+
+          {/* Tab content (non-map panels) */}
+          {tab !== "map" && (
+            <main style={{ position: "relative", zIndex: 10, flex: 1 }}>
+              {tab === "meets"  && <MeetsPanel city={city} onRouteTo={routeTo} />}
+              {tab === "garage" && (
+                <GaragePanel
+                  viewUserId={viewUser}
+                  onBack={viewUser ? () => { setViewUser(null); setTab("map"); } : undefined}
+                />
+              )}
+              {tab === "routes" && <RoutesPanel />}
+              {tab === "spots"  && <SpotsPanel city={city} onSelectSpot={focusSpotOnMap} onRouteTo={routeTo} />}
+              {tab === "chat"   && <ChatPanel city={city} />}
+            </main>
+          )}
+
+          <TabBar active={tab} onChange={(id) => { if (id !== "garage") setViewUser(null); setTab(id); }} />
         </div>
-
-        {tab !== "map" && (
-          <main className="relative z-10 flex-1">
-            {tab === "meets" && <MeetsPanel city={city} onRouteTo={routeTo} />}
-            {tab === "garage" && (
-              <GaragePanel
-                viewUserId={viewUser}
-                onBack={viewUser ? () => { setViewUser(null); setTab("map"); } : undefined}
-              />
-            )}
-            {tab === "routes" && <RoutesPanel />}
-            {tab === "spots" && <SpotsPanel city={city} onSelectSpot={focusSpotOnMap} onRouteTo={routeTo} />}
-            {tab === "chat" && <ChatPanel city={city} />}
-          </main>
-        )}
-
-        <TabBar active={tab} onChange={(id) => { if (id !== "garage") setViewUser(null); setTab(id); }} />
       </div>
     </StreetGridProvider>
   );

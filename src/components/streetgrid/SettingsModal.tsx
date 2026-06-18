@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { X, User, Map as MapIcon, Bell, Cog, LogOut, Trash2 } from "lucide-react";
+import { X, User, Map as MapIcon, Bell, Cog, LogOut, Trash2, Car } from "lucide-react";
 import { useStreetGrid, type DriverStatus, type Language, type NavProvider } from "@/lib/streetgrid/store";
+import { SELECTABLE_CARS } from "./CarSelector";
 
 type Props = { open: boolean; onClose: () => void };
 
@@ -17,7 +18,7 @@ const LANGS: { id: Language; label: string }[] = [
 ];
 
 export function SettingsModal({ open, onClose }: Props) {
-  const { profile, updateProfile, settings, updateSettings } = useStreetGrid();
+  const { profile, updateProfile, settings, updateSettings, selectedCarId, setSelectedCarId } = useStreetGrid();
   const [toast, setToast] = useState<string | null>(null);
 
   if (!open) return null;
@@ -102,7 +103,64 @@ export function SettingsModal({ open, onClose }: Props) {
             </Field>
           </Section>
 
-          {/* B. Map */}
+          {/* B. Garage */}
+          <Section icon={Car} title="ГАРАЖ · ВЫБОР АВТОМОБИЛЯ" accent="primary">
+            <div className="grid grid-cols-1 gap-2">
+              {SELECTABLE_CARS.map((car) => {
+                const active = selectedCarId === car.id;
+                return (
+                  <button
+                    key={car.id}
+                    onClick={() => setSelectedCarId(car.id)}
+                    className="w-full flex items-center gap-3 px-3 py-3 rounded-2xl border transition-all active:scale-[0.98]"
+                    style={{
+                      background:     active ? `${car.color}18` : "rgba(255,255,255,0.04)",
+                      borderColor:    active ? car.color         : "rgba(255,255,255,0.08)",
+                      boxShadow:      active ? `0 0 16px ${car.color}44` : "none",
+                    }}
+                  >
+                    {/* Color swatch */}
+                    <div
+                      className="shrink-0 w-10 h-10 rounded-xl flex items-center justify-center"
+                      style={{ background: car.color + "22", border: `2px solid ${car.color}66` }}
+                    >
+                      <svg width="24" height="34" viewBox="0 0 40 70" xmlns="http://www.w3.org/2000/svg">
+                        <ellipse cx="20" cy="40" rx="16" ry="26" fill={car.bodyColor}/>
+                        <ellipse cx="20" cy="35" rx="11" ry="16" fill={car.color + "cc"}/>
+                        <ellipse cx="20" cy="28" rx="8"  ry="9"  fill="rgba(150,220,255,0.6)"/>
+                        <rect x="1"  y="16" width="7" height="14" rx="3" fill="#1a1a1a"/>
+                        <rect x="1"  y="44" width="7" height="14" rx="3" fill="#1a1a1a"/>
+                        <rect x="32" y="16" width="7" height="14" rx="3" fill="#1a1a1a"/>
+                        <rect x="32" y="44" width="7" height="14" rx="3" fill="#1a1a1a"/>
+                        <ellipse cx="12" cy="14" rx="4" ry="3" fill="white" opacity="0.9"/>
+                        <ellipse cx="28" cy="14" rx="4" ry="3" fill="white" opacity="0.9"/>
+                        <ellipse cx="12" cy="64" rx="4" ry="3" fill="#ff3333" opacity="0.9"/>
+                        <ellipse cx="28" cy="64" rx="4" ry="3" fill="#ff3333" opacity="0.9"/>
+                      </svg>
+                    </div>
+                    {/* Name + description */}
+                    <div className="flex-1 text-left">
+                      <div className="text-sm font-black tracking-wide" style={{ color: active ? car.color : "#fff" }}>
+                        {car.name}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground mt-0.5">{car.description}</div>
+                    </div>
+                    {/* Selected badge */}
+                    {active && (
+                      <div
+                        className="shrink-0 text-[9px] font-black tracking-widest px-2 py-1 rounded-full"
+                        style={{ background: car.color + "33", color: car.color, border: `1px solid ${car.color}66` }}
+                      >
+                        ACTIVE
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </Section>
+
+          {/* C. Map */}
           <Section icon={MapIcon} title="КАРТА И НАВИГАЦИЯ" accent="accent">
             <Field label="НАВИГАТОР ДЛЯ «ПОЕХАЛИ»">
               <div className="grid grid-cols-3 gap-1.5">
@@ -138,7 +196,7 @@ export function SettingsModal({ open, onClose }: Props) {
             />
           </Section>
 
-          {/* C. Notifications */}
+          {/* D. Notifications */}
           <Section icon={Bell} title="УМНЫЕ УВЕДОМЛЕНИЯ" accent="primary">
             <Toggle
               label="Сигналы SOS в моём городе"
@@ -163,7 +221,7 @@ export function SettingsModal({ open, onClose }: Props) {
             />
           </Section>
 
-          {/* D. System */}
+          {/* E. System */}
           <Section icon={Cog} title="СИСТЕМА" accent="accent">
             <Field label="ЯЗЫК ПРИЛОЖЕНИЯ">
               <div className="grid grid-cols-3 gap-1.5">

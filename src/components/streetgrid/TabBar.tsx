@@ -14,7 +14,7 @@ const TABS: { id: TabId; label: string; icon: typeof Map }[] = [
 
 export function TabBar({ active, onChange }: { active: TabId; onChange: (id: TabId) => void }) {
   return (
-    <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 z-50 w-full max-w-[480px] glass-strong border-t border-white/[0.06] backdrop-blur-xl">
+    <nav className="absolute bottom-0 left-0 right-0 z-50 glass-strong border-t border-white/[0.06] backdrop-blur-xl">
       <div className="grid grid-cols-6 px-0.5 pt-1 pb-[max(0.4rem,env(safe-area-inset-bottom))]">
         {TABS.map((t) => {
           const Icon = t.icon;

@@ -25,6 +25,14 @@ export type Settings = {
   language:      Language;
 };
 
+const CAR_STORAGE_KEY = "sg-car-id";
+const CAR_DEFAULT_ID  = "bmw_m3";
+
+function loadCarId(): string {
+  try { return localStorage.getItem(CAR_STORAGE_KEY) ?? CAR_DEFAULT_ID; }
+  catch { return CAR_DEFAULT_ID; }
+}
+
 export type ChatInjection = {
   ts:    number;
   city:  string;
@@ -37,13 +45,16 @@ export type ChatInjection = {
 type StoreProfile = Pick<UserProfile, "handle" | "avatar" | "status" | "car">;
 
 type StreetGridStore = {
-  profile:        StoreProfile;
-  updateProfile:  (patch: Partial<StoreProfile>) => void;
-  updateCar:      (car: Car) => void;
-  settings:       Settings;
-  updateSettings: (patch: Partial<Settings>) => void;
-  chatInjections: ChatInjection[];
-  pushChat:       (msg: Omit<ChatInjection, "ts">) => void;
+  profile:          StoreProfile;
+  updateProfile:    (patch: Partial<StoreProfile>) => void;
+  updateCar:        (car: Car) => void;
+  settings:         Settings;
+  updateSettings:   (patch: Partial<Settings>) => void;
+  chatInjections:   ChatInjection[];
+  pushChat:         (msg: Omit<ChatInjection, "ts">) => void;
+  // Active car on the map — shared between MapView and SettingsModal
+  selectedCarId:    string;
+  setSelectedCarId: (id: string) => void;
 };
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
@@ -70,8 +81,9 @@ export function StreetGridProvider({ children }: { children: ReactNode }) {
     car:    ME.car,
   });
 
-  const [settings, setSettings]           = useState<Settings>(DEFAULT_SETTINGS);
-  const [chatInjections, setChatInjections] = useState<ChatInjection[]>([]);
+  const [settings, setSettings]             = useState<Settings>(DEFAULT_SETTINGS);
+  const [chatInjections, setChatInjections]  = useState<ChatInjection[]>([]);
+  const [selectedCarId, setSelectedCarIdState] = useState<string>(loadCarId);
 
   const updateProfile = useCallback((patch: Partial<StoreProfile>) => {
     setProfile((p) => ({ ...p, ...patch }));
@@ -89,9 +101,14 @@ export function StreetGridProvider({ children }: { children: ReactNode }) {
     setChatInjections((prev) => [...prev, { ...msg, ts: Date.now() }]);
   }, []);
 
+  const setSelectedCarId = useCallback((id: string) => {
+    try { localStorage.setItem(CAR_STORAGE_KEY, id); } catch { /* noop */ }
+    setSelectedCarIdState(id);
+  }, []);
+
   return (
     <StreetGridContext.Provider
-      value={{ profile, updateProfile, updateCar, settings, updateSettings, chatInjections, pushChat }}
+      value={{ profile, updateProfile, updateCar, settings, updateSettings, chatInjections, pushChat, selectedCarId, setSelectedCarId }}
     >
       {children}
     </StreetGridContext.Provider>
