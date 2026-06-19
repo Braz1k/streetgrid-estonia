@@ -547,21 +547,7 @@ function makeClusterEl(count: number): HTMLDivElement {
 // DRIVE  — full Waze: pitch 65, bearing = heading, car in lower third (WAZE_PADDING)
 type NavMode = "FREE" | "FOLLOW" | "DRIVE";
 
-// ─── Camera ownership ─────────────────────────────────────────────────────────
-// Only one system may drive the camera at any moment.
-// FOLLOW        — GPS reactive effect owns the camera (default nav mode)
-// EXPLORING     — user panned/rotated/pitched away; GPS does not interfere
-// ROUTE_PREVIEW — fitBounds showing the full route
-// SPOT_PREVIEW  — flyTo a spot, cluster, meetup, or search result
-// SOS_PREVIEW   — flyTo a SOS signal origin
-// CITY_OVERVIEW — flyTo another city on tab switch
-type CameraMode =
-  | "FOLLOW"
-  | "EXPLORING"
-  | "ROUTE_PREVIEW"
-  | "SPOT_PREVIEW"
-  | "SOS_PREVIEW"
-  | "CITY_OVERVIEW";
+// navMode is the single source of truth for all GPS camera behavior.
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -594,11 +580,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [selectedCarId, setSelectedCarId] = useState<string>(GARAGE_CARS[0].id);
   const [carSheetOpen,  setCarSheetOpen]  = useState(false);
   const [searchOpen,    setSearchOpen]    = useState(false);
-  // Camera ownership — only one system drives the camera at any moment.
-  // Starts as EXPLORING (nothing to follow); switches to FOLLOW on first GPS fix.
-  const [cameraMode, setCameraMode] = useState<CameraMode>("EXPLORING");
-  // Ref mirror for mount-only closures (zoom / gesture listeners).
-  const cameraModeRef = useRef<CameraMode>("EXPLORING");
   // GPS permission / availability status used to drive the overlay.
   // 'loading'  — waiting for first position or permission answer
   // 'granted'  — at least one position received (or user skipped)
@@ -606,25 +587,25 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [gpsStatus, setGpsStatus] = useState<"loading" | "granted" | "denied">("loading");
   // Incrementing this re-runs the watchPosition effect (retry after denial).
   const [gpsAttempt, setGpsAttempt] = useState(0);
-  // Becomes true on the first watchPosition success callback regardless of accuracy,
-  // OR on a timeout (code 3), dismissing the loading overlay unconditionally.
+  // True once the first GPS callback has arrived; used to detect the initial flyTo.
   const [hasInitialPosition, setHasInitialPosition] = useState(false);
-  // True only when the last position fix had accuracy ≤ 1000 m (real GPS/WiFi).
-  // False for coarse IP-based fixes — drives the "Approximate location" badge.
+  // True only when the last fix had accuracy ≤ 1000 m — drives the coarse badge.
   const [isPreciseLocation, setIsPreciseLocation] = useState(false);
   // Latest GPS snapshot — drives the reactive camera effect.
-  // Now set on every watchPosition success (regardless of accuracy).
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number } | null>(null);
-  // Set to true around programmatic easeTo/flyTo calls so zoomstart/pitchstart
-  // listeners don't incorrectly switch cameraMode during our own animations.
+  // Set to true around programmatic easeTo/flyTo so gesture listeners don't
+  // accidentally flip navMode to FREE during our own animations.
   const isProgrammaticRef = useRef(false);
 
-  // Keep cameraModeRef current so mount-only closures always read the latest mode.
-  useEffect(() => { cameraModeRef.current = cameraMode; }, [cameraMode]);
-
-  // GPS recenter button mode — cycles FREE → FOLLOW → DRIVE → FREE.
-  // Starts FREE; switches to FOLLOW/DRIVE on first GPS fix (via recenter/gesture flow).
+  // Navigation mode — single source of truth for all GPS camera behavior.
+  // FREE   — GPS updates BMW position; camera stays where the user left it
+  // FOLLOW — camera recentres on car each GPS tick; pitch/bearing user-controlled
+  // DRIVE  — full Waze: pitch 65, heading bearing, zoom 18, car in lower third
   const [navMode, setNavMode] = useState<NavMode>("FREE");
+  // Ref mirror lets mount-only closures (zoom / gesture event handlers) always
+  // read the latest navMode without stale-closure issues.
+  const navModeRef = useRef<NavMode>("FREE");
+  useEffect(() => { navModeRef.current = navMode; }, [navMode]);
 
   // Whether 3D building fill-extrusion layers are visible.
   const [showBuildings, setShowBuildings] = useState(true);
@@ -647,9 +628,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const map = new mapboxgl.Map({
       container:          containerRef.current,
       style:              "mapbox://styles/mapbox/dark-v11",
-      center:             [0, 0], // neutral — GPS jumpTo overrides on first real fix
-      zoom:               2,
-      pitch:              0,
+      // Map-first: always start at Tallinn overview regardless of GPS state.
+      // GPS arrival will flyTo the user's real position via the reactive effect.
+      center:             [24.7536, 59.437],
+      zoom:               12,
+      pitch:              45,
       bearing:            0,
       antialias:          true,
       attributionControl: false,
@@ -793,20 +776,19 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     // Zoom is excluded: pinch-zoom changes the zoom level while the zoom
     // listener below keeps the centre locked on the car during FOLLOW mode.
     // isProgrammaticRef prevents our own easeTo/flyTo calls from firing these.
+    // Any user-initiated drag, pitch, or rotate → hand camera back to FREE.
+    // isProgrammaticRef prevents our own animations from triggering this.
     const onUserGesture = () => {
-      if (!isProgrammaticRef.current) {
-        setCameraMode("EXPLORING");
-        setNavMode("FREE"); // reflect in button UI
-      }
+      if (!isProgrammaticRef.current) setNavMode("FREE");
     };
     map.on("dragstart",   onUserGesture);
     map.on("pitchstart",  onUserGesture);
     map.on("rotatestart", onUserGesture);
 
-    // Touch / scroll zoom — when in FOLLOW mode, snap the map centre back to
-    // the car on every zoom frame so it never drifts to the pinch midpoint.
+    // Touch / scroll zoom — in FOLLOW or DRIVE mode, keep the car centred so
+    // it never drifts toward the pinch midpoint during zoom gestures.
     map.on("zoom", (e) => {
-      if ((e as mapboxgl.MapMouseEvent).originalEvent && cameraModeRef.current === "FOLLOW") {
+      if ((e as mapboxgl.MapMouseEvent).originalEvent && navModeRef.current !== "FREE") {
         const [lat, lng] = carPositionRef.current;
         map.setCenter([lng, lat]);
       }
@@ -827,7 +809,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   //
   // This effect ONLY updates refs (for the Three.js render loop) and the
   // userCoords state (which drives the reactive camera effect below).
-  // Camera movement is handled separately so it can react to cameraMode changes.
+  // Camera movement is handled by the separate reactive effect below.
   //
   useEffect(() => {
     // If the Geolocation API is completely absent (e.g. insecure origin), bail out.
@@ -876,13 +858,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         console.error(`[GPS] watchPosition error — code ${err.code}: ${err.message}`);
 
         if (err.code === 3) {
-          // TIMEOUT (code 3) — no position was received within 5 s.
-          // Requirement: never keep the user on the loading screen forever.
-          // Dismiss the overlay and let the map show at the default world view.
-          console.warn("[GPS] Timeout — dismissing loading overlay");
-          setHasInitialPosition(true);
+          // TIMEOUT (code 3) — browser couldn't get a high-accuracy fix in 5 s.
+          // Map-first: the map is already showing; just log and keep watching.
+          // The browser will continue trying — no badge needed for a transient timeout.
+          console.warn("[GPS] Timeout — continuing to watch for position");
         } else {
-          // PERMISSION_DENIED (1) or POSITION_UNAVAILABLE (2) — show denied screen.
+          // PERMISSION_DENIED (1) or POSITION_UNAVAILABLE (2) — show warning badge.
           setGpsStatus("denied");
         }
       },
@@ -892,69 +873,69 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     return () => navigator.geolocation.clearWatch(watchId);
   }, [gpsAttempt]); // gpsAttempt increments on user retry — restarts the watch
 
-  // ── Reactive camera + circle-marker effect ────────────────────────────────────
+  // ── Reactive GPS camera effect ────────────────────────────────────────────────
   //
-  // Runs whenever userCoords, cameraMode, or hasInitialPosition changes.
-  // Responsibilities:
-  //   1. Always sync the far-zoom circle marker to the new position.
-  //   2. On the FIRST real GPS fix: jumpTo the user's location, claim FOLLOW mode.
-  //   3. On subsequent fixes: move camera ONLY when cameraMode === "FOLLOW".
+  // navMode is the single driver — no secondary cameraMode system.
   //
-  // isProgrammaticRef is set true around easeTo/flyTo/jumpTo so the synchronous
-  // zoomstart/pitchstart events they fire don't switch cameraMode to EXPLORING.
+  //   FREE   → circle marker updates; camera stays where the user left it.
+  //   FOLLOW → easeTo(centre only) on every GPS tick.
+  //   DRIVE  → easeTo(centre + zoom 18 + pitch 65 + heading bearing + padding).
+  //
+  // First GPS arrival: always flyTo the user's position and activate DRIVE.
+  //
+  // isProgrammaticRef guards against the synchronous movestart / pitchstart
+  // events fired by easeTo/flyTo setting navMode back to FREE.
   //
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !userCoords) return;
 
-    // 1. Circle marker always tracks live position
+    // 1. Circle marker always tracks live GPS position.
     (map.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
       ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [userCoords.lng, userCoords.lat] }, properties: {} });
 
-    // 2. First position — snap the camera and claim ownership.
-    // userCoords is now set on every watchPosition success regardless of accuracy.
-    // The badge (isPreciseLocation) communicates coarse-fix state to the user.
+    // 2. First GPS fix — fly from Tallinn overview to user's street-level position.
     if (!hasInitialPosition) {
       setHasInitialPosition(true);
-      setCameraMode("FOLLOW");
+      setNavMode("DRIVE");
       isProgrammaticRef.current = true;
-      map.jumpTo({
-        center:  [userCoords.lng, userCoords.lat],
-        zoom:    18.0,
-        pitch:   65,
-        bearing: userCoords.heading,
+      map.flyTo({
+        center:    [userCoords.lng, userCoords.lat],
+        zoom:      18.0,
+        pitch:     65,
+        bearing:   userCoords.heading,
+        padding:   WAZE_PADDING,
+        duration:  2000,
+        essential: true,
       });
       isProgrammaticRef.current = false;
       return;
     }
 
-    // 3. Subsequent fixes — GPS may only move the camera while it owns it.
-    //    Camera parameters are determined by the active NavMode:
-    //    DRIVE  → full Waze (pitch 65, heading bearing, lower-third padding)
-    //    FOLLOW → soft follow (centre only; pitch & bearing user-controlled)
-    if (cameraMode === "FOLLOW") {
-      isProgrammaticRef.current = true;
-      if (navMode === "DRIVE") {
-        map.easeTo({
-          center:   [userCoords.lng, userCoords.lat],
-          zoom:     18.0,
-          pitch:    65,
-          bearing:  userCoords.heading,
-          padding:  WAZE_PADDING,
-          duration: 1000,
-          essential: true,
-        });
-      } else {
-        // FOLLOW — keeps car visible without forcing orientation
-        map.easeTo({
-          center:   [userCoords.lng, userCoords.lat],
-          duration: 600,
-          essential: true,
-        });
-      }
-      isProgrammaticRef.current = false;
+    // 3. Subsequent GPS ticks — navMode is the sole arbiter.
+    if (navMode === "FREE") return; // camera belongs to the user
+
+    isProgrammaticRef.current = true;
+    if (navMode === "DRIVE") {
+      map.easeTo({
+        center:   [userCoords.lng, userCoords.lat],
+        zoom:     18.0,
+        pitch:    65,
+        bearing:  userCoords.heading,
+        padding:  WAZE_PADDING,
+        duration: 1000,
+        essential: true,
+      });
+    } else {
+      // FOLLOW — recentre only; pitch and bearing stay where the user left them.
+      map.easeTo({
+        center:   [userCoords.lng, userCoords.lat],
+        duration: 600,
+        essential: true,
+      });
     }
-  }, [userCoords, cameraMode, navMode, hasInitialPosition]);
+    isProgrammaticRef.current = false;
+  }, [userCoords, navMode, hasInitialPosition]);
 
   // ── Fly to city / Waze mode on tab switch ─────────────────────────────────────
   useEffect(() => {
@@ -963,14 +944,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (!map) return;
 
     if (city === "tallinn" || city === "all") {
-      // For Tallinn/all the GPS reactive effect owns the camera position.
+      // For Tallinn/all the GPS reactive effect drives the camera position.
       // Only restore the Waze padding so the car stays in the lower third.
-      // Do NOT change cameraMode — user may be in FOLLOW or EXPLORING and we
-      // should not override that choice just because the tab was re-selected.
+      // navMode is left unchanged — no reason to override the user's current choice.
       map.setPadding(WAZE_PADDING);
     } else {
-      // Other cities: claim camera ownership and fly to the city overview.
-      setCameraMode("CITY_OVERVIEW");
+      // Other cities: release GPS follow and fly to the city overview.
+      setNavMode("FREE");
       map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
       isProgrammaticRef.current = true;
       map.flyTo({
@@ -1047,7 +1027,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   const fitRouteBounds = useCallback((coords: [number, number][]) => {
     if (coords.length < 2) return;
-    setCameraMode("ROUTE_PREVIEW");
+    setNavMode("FREE"); // release GPS follow while showing the full route
     const bounds = coords.reduce((b, c) => b.extend(c), new mapboxgl.LngLatBounds(coords[0], coords[0]));
     isProgrammaticRef.current = true;
     mapRef.current?.fitBounds(bounds, {
@@ -1181,7 +1161,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             e.stopPropagation();
             source.getClusterExpansionZoom(clusterId, (err, zoom) => {
               if (err || zoom == null) return;
-              setCameraMode("SPOT_PREVIEW");
+              setNavMode("FREE");
               isProgrammaticRef.current = true;
               map.easeTo({ center: coords, zoom: zoom + 0.5, duration: 600 });
               isProgrammaticRef.current = false;
@@ -1274,7 +1254,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (!focusSpot || !ready) return;
     const target = [...SPOTS, ...userSpots].find((s) => s.id === focusSpot.id);
     if (!target) return;
-    setCameraMode("SPOT_PREVIEW");
+    setNavMode("FREE");
     isProgrammaticRef.current = true;
     mapRef.current?.flyTo({
       center: toLngLat(target.coords), zoom: WAZE_ZOOM,
@@ -1294,8 +1274,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     runRouteTo(routeRequest.coords, routeRequest.name);
   }, [routeRequest, ready, runRouteTo]);
 
-  // ── Recenter to Waze mode ─────────────────────────────────────────────────────
-  // Cycles the GPS button: FREE → FOLLOW → DRIVE → FREE.
+  // ── GPS nav button ─────────────────────────────────────────────────────────────
+  // Cycles FREE → FOLLOW → DRIVE → FREE.
   // Each step immediately moves the camera so the user sees a response before
   // the next GPS tick arrives; subsequent ticks are handled by the reactive effect.
   const cycleNavMode = () => {
@@ -1304,9 +1284,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const [lat, lng] = carPositionRef.current;
 
     if (navMode === "FREE") {
-      // FREE → FOLLOW: centre on car, keep user's current pitch & bearing.
+      // FREE → FOLLOW: recentre on car; keep user's pitch & bearing.
       setNavMode("FOLLOW");
-      setCameraMode("FOLLOW");
       isProgrammaticRef.current = true;
       map.easeTo({ center: [lng, lat], duration: 800, essential: true });
       isProgrammaticRef.current = false;
@@ -1314,7 +1293,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     } else if (navMode === "FOLLOW") {
       // FOLLOW → DRIVE: full Waze — pitch 65, heading bearing, lower-third padding.
       setNavMode("DRIVE");
-      setCameraMode("FOLLOW");
       isProgrammaticRef.current = true;
       map.flyTo({
         center:    [lng, lat],
@@ -1328,9 +1306,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       isProgrammaticRef.current = false;
 
     } else {
-      // DRIVE → FREE: release camera, user is free to pan.
+      // DRIVE → FREE: release camera; user is free to pan.
       setNavMode("FREE");
-      setCameraMode("EXPLORING");
     }
   };
 
@@ -1342,7 +1319,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       note: note || undefined, user: profile.handle, coords, time,
     };
     setSignals((s) => [...s, sig]);
-    setCameraMode("SOS_PREVIEW");
+    setNavMode("FREE");
     setTimeout(() => {
       isProgrammaticRef.current = true;
       mapRef.current?.flyTo({
@@ -1380,46 +1357,25 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     <div className="relative sg-map-wrap h-full">
       <div ref={containerRef} className="sg-map h-full w-full" />
 
-      {/* GPS overlay — shown until first real fix or user dismisses */}
-      {!hasInitialPosition && (
-        <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-[#0e1015]">
-          {gpsStatus === "denied" ? (
-            /* ── Permission denied / unavailable ── */
-            <div className="text-center px-8 max-w-xs">
-              <div className="mb-5 h-14 w-14 mx-auto rounded-full bg-red-500/10 flex items-center justify-center">
-                <svg className="h-7 w-7 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                </svg>
-              </div>
-              <h2 className="text-white font-bold text-base mb-1">Доступ к геолокации не предоставлен</h2>
-              <p className="text-gray-500 text-xs mb-6 leading-relaxed">
-                Разрешите доступ к местоположению в настройках браузера, чтобы использовать навигацию.
-              </p>
-              <button
-                onClick={() => setGpsAttempt((n) => n + 1)}
-                className="w-full mb-3 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-sm transition"
-              >
-                Разрешить доступ
-              </button>
-              <button
-                onClick={() => setHasInitialPosition(true)}
-                className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 font-medium text-sm transition"
-              >
-                Продолжить без GPS
-              </button>
-            </div>
-          ) : (
-            /* ── Acquiring fix ── */
-            <div className="text-center">
-              <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-700 border-t-cyan-400 mx-auto" />
-              <p className="text-sm font-medium text-gray-400">Поиск спутников GPS…</p>
-            </div>
-          )}
+      {/* ── GPS status badge — non-blocking, top-center ──────────────────────────
+           GPS is an enhancement; map is always visible regardless of GPS state.
+           Priority: denied > approximate > (nothing when precise GPS active)      */}
+      {gpsStatus === "denied" ? (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[700]">
+          <div className="flex items-center gap-2 rounded-full bg-red-500/15 border border-red-500/30 px-3 py-1 backdrop-blur-sm">
+            <span className="h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" />
+            <span className="text-[10px] font-semibold text-red-300 tracking-wide whitespace-nowrap">
+              GPS unavailable
+            </span>
+            <button
+              onClick={() => setGpsAttempt((n) => n + 1)}
+              className="ml-0.5 text-[9px] font-bold text-red-300/80 hover:text-red-200 transition"
+            >
+              Retry
+            </button>
+          </div>
         </div>
-      )}
-
-      {/* Approximate location badge — shown when map is visible but fix is coarse */}
-      {hasInitialPosition && userCoords && !isPreciseLocation && (
+      ) : userCoords && !isPreciseLocation ? (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[700] pointer-events-none">
           <div className="flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-3 py-1 backdrop-blur-sm">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
@@ -1428,7 +1384,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             </span>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* ── Navigation overlay ── */}
       {activeRoute && (
@@ -1478,36 +1434,37 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           <Building2 className="h-4 w-4" />
         </button>
 
-        {/* GPS recenter — FREE / FOLLOW / DRIVE */}
-        <button
-          onClick={cycleNavMode}
-          title={
-            navMode === "FREE"
-              ? "Центрировать на машине"
-              : navMode === "FOLLOW"
-              ? "Включить режим движения"
-              : "Отключить слежение"
-          }
-          className={`relative h-9 w-9 grid place-items-center rounded-xl glass-strong transition
-            ${navMode === "DRIVE"
-              ? "text-accent shadow-[0_0_10px_rgba(0,240,255,0.45)]"
-              : navMode === "FOLLOW"
-              ? "text-accent/70"
-              : "text-muted-foreground/50 hover:text-accent/70"
-            }`}
-        >
-          <Navigation
-            className="h-4 w-4"
-            style={navMode === "DRIVE" ? { fill: "currentColor" } : undefined}
-          />
-          {/* State label badge */}
+        {/* GPS nav button — FREE / FOLLOW / DRIVE */}
+        <div className="flex flex-col items-center gap-[3px]">
+          <button
+            onClick={cycleNavMode}
+            title={
+              navMode === "FREE"
+                ? "Центрировать на машине"
+                : navMode === "FOLLOW"
+                ? "Включить режим движения"
+                : "Отключить слежение"
+            }
+            className={`h-9 w-9 grid place-items-center rounded-xl transition
+              ${navMode === "DRIVE"
+                ? "bg-accent shadow-[0_0_14px_rgba(0,240,255,0.55)] text-black"
+                : navMode === "FOLLOW"
+                ? "glass-strong text-accent shadow-[0_0_8px_rgba(0,240,255,0.3)] ring-1 ring-accent/40"
+                : "glass-strong text-muted-foreground/50 hover:text-accent/60"
+              }`}
+          >
+            <Navigation
+              className="h-4 w-4"
+              style={navMode !== "FREE" ? { fill: "currentColor" } : undefined}
+            />
+          </button>
           <span
-            className={`absolute -bottom-[1px] left-1/2 -translate-x-1/2 text-[7px] font-black tracking-widest leading-none
+            className={`text-[7px] font-black tracking-widest leading-none
               ${navMode === "DRIVE" ? "text-accent" : navMode === "FOLLOW" ? "text-accent/60" : "text-muted-foreground/40"}`}
           >
             {navMode}
           </span>
-        </button>
+        </div>
       </div>
 
       {/* ── Bottom Waze bar ── */}
@@ -1673,7 +1630,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       className="flex items-center gap-3 flex-1 min-w-0 text-left"
                       onClick={() => {
                         setSearchOpen(false);
-                        setCameraMode("SPOT_PREVIEW");
+                        setNavMode("FREE");
                         isProgrammaticRef.current = true;
                         mapRef.current?.flyTo({
                           center: toLngLat(spot.coords), zoom: WAZE_ZOOM,
@@ -1707,7 +1664,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       className="flex items-center gap-3 flex-1 min-w-0 text-left"
                       onClick={() => {
                         setSearchOpen(false);
-                        setCameraMode("SPOT_PREVIEW");
+                        setNavMode("FREE");
                         isProgrammaticRef.current = true;
                         mapRef.current?.flyTo({
                           center: toLngLat(mt.coords), zoom: WAZE_ZOOM,
