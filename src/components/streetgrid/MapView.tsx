@@ -323,6 +323,7 @@ class CarLayer {
   private camera!:        THREE.Camera;
   private carGroup!:      THREE.Group;
   private smoothHeading = 0;
+  private smoothScale   = 3.2; // start at the navigation-zoom value; lerps like heading
   private currentCarId:   string;
 
   private readonly cars:       GarageCar[];
@@ -456,10 +457,16 @@ class CarLayer {
     const dh          = ((this.headingRef.current - this.smoothHeading + 540) % 360) - 180;
     this.smoothHeading = (this.smoothHeading + dh * 0.12 + 360) % 360;
 
+    // Smooth scale interpolation — prevents the car from appearing to drift
+    // during zoom animations when _getZoomScale changes rapidly each frame.
+    // Same lerp pattern as heading; 0.08 keeps it snappy without snapping.
+    const targetScale  = this._getZoomScale(zoom);
+    this.smoothScale   = this.smoothScale + (targetScale - this.smoothScale) * 0.08;
+
     const [lat, lng] = this.posRef.current;
     const mercator   = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
     const rawS       = mercator.meterInMercatorCoordinateUnits();
-    const s          = rawS * this._getZoomScale(zoom); // zoom-compensated scale
+    const s          = rawS * this.smoothScale; // smoothed zoom-compensated scale
 
     const headingRad  = (this.smoothHeading * Math.PI) / 180;
     const modelMatrix = new THREE.Matrix4()
@@ -532,6 +539,22 @@ function makeClusterEl(count: number): HTMLDivElement {
   return el;
 }
 
+// ─── Camera ownership ─────────────────────────────────────────────────────────
+// Only one system may drive the camera at any moment.
+// FOLLOW        — GPS reactive effect owns the camera (default nav mode)
+// EXPLORING     — user panned/rotated/pitched away; GPS does not interfere
+// ROUTE_PREVIEW — fitBounds showing the full route
+// SPOT_PREVIEW  — flyTo a spot, cluster, meetup, or search result
+// SOS_PREVIEW   — flyTo a SOS signal origin
+// CITY_OVERVIEW — flyTo another city on tab switch
+type CameraMode =
+  | "FOLLOW"
+  | "EXPLORING"
+  | "ROUTE_PREVIEW"
+  | "SPOT_PREVIEW"
+  | "SOS_PREVIEW"
+  | "CITY_OVERVIEW";
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) {
@@ -563,17 +586,22 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [selectedCarId, setSelectedCarId] = useState<string>(GARAGE_CARS[0].id);
   const [carSheetOpen,  setCarSheetOpen]  = useState(false);
   const [searchOpen,    setSearchOpen]    = useState(false);
-  // Follow mode — false on load; turns true only after the first real GPS fix.
-  // Manual gestures flip it back to false. Crosshair button restores it.
-  const [isFollowing,       setIsFollowing]       = useState(false);
-  // Becomes true once the first GPS coordinate has been received.
+  // Camera ownership — only one system drives the camera at any moment.
+  // Starts as EXPLORING (nothing to follow); switches to FOLLOW on first GPS fix.
+  const [cameraMode, setCameraMode] = useState<CameraMode>("EXPLORING");
+  // Ref mirror for mount-only closures (zoom / gesture listeners).
+  const cameraModeRef = useRef<CameraMode>("EXPLORING");
+  // Becomes true once the first real GPS coordinate has been received.
   const [hasInitialPosition, setHasInitialPosition] = useState(false);
   // Latest GPS snapshot — drives the reactive camera effect.
   // Only set from watchPosition when accuracy ≤ 1000 m (real device GPS/WiFi).
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number } | null>(null);
   // Set to true around programmatic easeTo/flyTo calls so zoomstart/pitchstart
-  // listeners don't incorrectly disable follow mode during our own animations.
+  // listeners don't incorrectly switch cameraMode during our own animations.
   const isProgrammaticRef = useRef(false);
+
+  // Keep cameraModeRef current so mount-only closures always read the latest mode.
+  useEffect(() => { cameraModeRef.current = cameraMode; }, [cameraMode]);
 
   const cityObj      = getCity(city);
   const allSpots     = [...SPOTS, ...userSpots];
@@ -599,6 +627,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       bearing:            0,
       antialias:          true,
       attributionControl: false,
+      // Mouse-wheel zoom always centres on the map centre, not the cursor
+      scrollZoom:         { around: "center" },
     });
 
     map.on("load", () => {
@@ -732,15 +762,26 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       setReady(true);
     });
 
-    // Attach gesture listeners immediately after map creation — NOT inside
-    // map.on('load') — so touches that happen during style loading are caught too.
-    // isProgrammaticRef guards zoomstart/pitchstart from firing during our own
-    // easeTo/flyTo calls (Mapbox fires those events synchronously on programmatic moves).
-    const onUserGesture = () => { if (!isProgrammaticRef.current) setIsFollowing(false); };
+    // ── Gesture listeners ──────────────────────────────────────────────────────
+    // Drag / pitch / rotate hand camera ownership to the user (EXPLORING).
+    // Zoom is excluded: pinch-zoom changes the zoom level while the zoom
+    // listener below keeps the centre locked on the car during FOLLOW mode.
+    // isProgrammaticRef prevents our own easeTo/flyTo calls from firing these.
+    const onUserGesture = () => {
+      if (!isProgrammaticRef.current) setCameraMode("EXPLORING");
+    };
     map.on("dragstart",   onUserGesture);
-    map.on("zoomstart",   onUserGesture);
     map.on("pitchstart",  onUserGesture);
     map.on("rotatestart", onUserGesture);
+
+    // Touch / scroll zoom — when in FOLLOW mode, snap the map centre back to
+    // the car on every zoom frame so it never drifts to the pinch midpoint.
+    map.on("zoom", (e) => {
+      if ((e as mapboxgl.MapMouseEvent).originalEvent && cameraModeRef.current === "FOLLOW") {
+        const [lat, lng] = carPositionRef.current;
+        map.setCenter([lng, lat]);
+      }
+    });
 
     map.touchPitch.enable();
     mapRef.current = map;
@@ -757,7 +798,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   //
   // This effect ONLY updates refs (for the Three.js render loop) and the
   // userCoords state (which drives the reactive camera effect below).
-  // Camera movement is handled separately so it can react to isFollowing changes.
+  // Camera movement is handled separately so it can react to cameraMode changes.
   //
   useEffect(() => {
     if (!navigator.geolocation) return;
@@ -798,14 +839,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   // ── Reactive camera + circle-marker effect ────────────────────────────────────
   //
-  // Runs whenever userCoords, isFollowing, or hasInitialPosition changes.
+  // Runs whenever userCoords, cameraMode, or hasInitialPosition changes.
   // Responsibilities:
   //   1. Always sync the far-zoom circle marker to the new position.
-  //   2. On the FIRST real GPS fix: jumpTo the user's location and enable following.
-  //   3. On subsequent fixes: if following, easeTo with 3D navigator settings.
+  //   2. On the FIRST real GPS fix: jumpTo the user's location, claim FOLLOW mode.
+  //   3. On subsequent fixes: move camera ONLY when cameraMode === "FOLLOW".
   //
-  // isProgrammaticRef is set true around easeTo/flyTo so that the synchronous
-  // zoomstart/pitchstart events they fire don't accidentally flip isFollowing=false.
+  // isProgrammaticRef is set true around easeTo/flyTo/jumpTo so the synchronous
+  // zoomstart/pitchstart events they fire don't switch cameraMode to EXPLORING.
   //
   useEffect(() => {
     const map = mapRef.current;
@@ -815,12 +856,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     (map.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
       ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [userCoords.lng, userCoords.lat] }, properties: {} });
 
-    // 2. First GPS fix — snap the map to the user's real location.
+    // 2. First GPS fix — snap to real location and claim camera ownership.
     // userCoords is only set from watchPosition when accuracy ≤ 1000 m, so any
     // value here is already a trustworthy device fix.
     if (!hasInitialPosition) {
       setHasInitialPosition(true);
-      setIsFollowing(true);
+      setCameraMode("FOLLOW");
       isProgrammaticRef.current = true;
       map.jumpTo({
         center:  [userCoords.lng, userCoords.lat],
@@ -832,8 +873,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       return;
     }
 
-    // 3. Subsequent fixes — smooth follow only when mode is active
-    if (isFollowing) {
+    // 3. Subsequent fixes — GPS may only move the camera while it owns it.
+    if (cameraMode === "FOLLOW") {
       isProgrammaticRef.current = true;
       map.easeTo({
         center:   [userCoords.lng, userCoords.lat],
@@ -846,7 +887,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       });
       isProgrammaticRef.current = false;
     }
-  }, [userCoords, isFollowing, hasInitialPosition]);
+  }, [userCoords, cameraMode, hasInitialPosition]);
 
   // ── Fly to city / Waze mode on tab switch ─────────────────────────────────────
   useEffect(() => {
@@ -857,12 +898,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (city === "tallinn" || city === "all") {
       // For Tallinn/all the GPS reactive effect owns the camera position.
       // Only restore the Waze padding so the car stays in the lower third.
-      // (Formerly flew to ME.location which fired zoomstart without the
-      //  isProgrammaticRef guard, silently killing follow mode on every load.)
+      // Do NOT change cameraMode — user may be in FOLLOW or EXPLORING and we
+      // should not override that choice just because the tab was re-selected.
       map.setPadding(WAZE_PADDING);
     } else {
-      // Other cities: fly to overview. Guard with isProgrammaticRef so
-      // zoomstart doesn't accidentally flip isFollowing off.
+      // Other cities: claim camera ownership and fly to the city overview.
+      setCameraMode("CITY_OVERVIEW");
       map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
       isProgrammaticRef.current = true;
       map.flyTo({
@@ -921,11 +962,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   const fitRouteBounds = useCallback((coords: [number, number][]) => {
     if (coords.length < 2) return;
+    setCameraMode("ROUTE_PREVIEW");
     const bounds = coords.reduce((b, c) => b.extend(c), new mapboxgl.LngLatBounds(coords[0], coords[0]));
+    isProgrammaticRef.current = true;
     mapRef.current?.fitBounds(bounds, {
       padding: { top: 140, bottom: 180, left: 60, right: 60 },
       pitch: WAZE_PITCH, bearing: headingRef.current, duration: 1400, essential: true,
     });
+    isProgrammaticRef.current = false;
   }, []);
 
   const runRouteTo = useCallback(async (dest: [number, number], name: string) => {
@@ -1052,7 +1096,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             e.stopPropagation();
             source.getClusterExpansionZoom(clusterId, (err, zoom) => {
               if (err || zoom == null) return;
+              setCameraMode("SPOT_PREVIEW");
+              isProgrammaticRef.current = true;
               map.easeTo({ center: coords, zoom: zoom + 0.5, duration: 600 });
+              isProgrammaticRef.current = false;
             });
           });
           spotMarkersRef.current[key] = new mapboxgl.Marker({ element: el }).setLngLat(coords).addTo(map);
@@ -1142,11 +1189,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     if (!focusSpot || !ready) return;
     const target = [...SPOTS, ...userSpots].find((s) => s.id === focusSpot.id);
     if (!target) return;
+    setCameraMode("SPOT_PREVIEW");
+    isProgrammaticRef.current = true;
     mapRef.current?.flyTo({
       center: toLngLat(target.coords), zoom: WAZE_ZOOM,
       pitch: WAZE_PITCH, bearing: headingRef.current,
       duration: 1600, essential: true,
     });
+    isProgrammaticRef.current = false;
     setTimeout(() => {
       const m = spotMarkersRef.current[target.id];
       if (m && !m.getPopup()?.isOpen()) m.togglePopup();
@@ -1163,10 +1213,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const recenter = () => {
     const map = mapRef.current;
     if (!map) return;
-    // Re-enable follow mode — the reactive effect will pick up the next GPS tick
-    setIsFollowing(true);
-    // Immediate flyTo for instant responsiveness (don't wait for the next GPS tick).
-    // isProgrammaticRef prevents the synchronous zoomstart it fires from disabling follow.
+    // Claim FOLLOW ownership — GPS reactive effect resumes on next tick.
+    setCameraMode("FOLLOW");
+    // Immediate flyTo for responsiveness (don't wait for the next GPS tick).
+    // isProgrammaticRef prevents the synchronous zoomstart it fires from
+    // switching cameraMode back to EXPLORING.
     const [lat, lng] = carPositionRef.current;
     isProgrammaticRef.current = true;
     map.flyTo({
@@ -1189,11 +1240,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       note: note || undefined, user: profile.handle, coords, time,
     };
     setSignals((s) => [...s, sig]);
-    setTimeout(() => mapRef.current?.flyTo({
-      center: toLngLat(coords), zoom: WAZE_ZOOM,
-      pitch: WAZE_PITCH, bearing: headingRef.current,
-      duration: 1200, essential: true,
-    }), 100);
+    setCameraMode("SOS_PREVIEW");
+    setTimeout(() => {
+      isProgrammaticRef.current = true;
+      mapRef.current?.flyTo({
+        center: toLngLat(coords), zoom: WAZE_ZOOM,
+        pitch: WAZE_PITCH, bearing: headingRef.current,
+        duration: 1200, essential: true,
+      });
+      isProgrammaticRef.current = false;
+    }, 100);
     const targetCity = city === "all" ? "tallinn" : city;
     pushChat({
       city: targetCity, user: profile.handle,
@@ -1273,7 +1329,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           onClick={recenter}
           title="Вернуться к машине"
           className={`h-9 w-9 grid place-items-center rounded-xl glass-strong transition ${
-            isFollowing ? "text-accent" : "text-muted-foreground/50 hover:text-accent"
+            cameraMode === "FOLLOW" ? "text-accent" : "text-muted-foreground/50 hover:text-accent"
           }`}
         >
           <Crosshair className="h-4 w-4" />
@@ -1443,11 +1499,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       className="flex items-center gap-3 flex-1 min-w-0 text-left"
                       onClick={() => {
                         setSearchOpen(false);
+                        setCameraMode("SPOT_PREVIEW");
+                        isProgrammaticRef.current = true;
                         mapRef.current?.flyTo({
                           center: toLngLat(spot.coords), zoom: WAZE_ZOOM,
                           pitch: WAZE_PITCH, bearing: headingRef.current,
                           duration: 1600, essential: true,
                         });
+                        isProgrammaticRef.current = false;
                       }}
                     >
                       <span className="text-xl shrink-0">{SPOT_VISUAL[spot.type].emoji}</span>
@@ -1474,11 +1533,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       className="flex items-center gap-3 flex-1 min-w-0 text-left"
                       onClick={() => {
                         setSearchOpen(false);
+                        setCameraMode("SPOT_PREVIEW");
+                        isProgrammaticRef.current = true;
                         mapRef.current?.flyTo({
                           center: toLngLat(mt.coords), zoom: WAZE_ZOOM,
                           pitch: WAZE_PITCH, bearing: headingRef.current,
                           duration: 1600, essential: true,
                         });
+                        isProgrammaticRef.current = false;
                       }}
                     >
                       <span className="text-xl shrink-0">{mt.cover}</span>
