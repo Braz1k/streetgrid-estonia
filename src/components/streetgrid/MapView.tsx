@@ -591,6 +591,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [cameraMode, setCameraMode] = useState<CameraMode>("EXPLORING");
   // Ref mirror for mount-only closures (zoom / gesture listeners).
   const cameraModeRef = useRef<CameraMode>("EXPLORING");
+  // GPS permission / availability status used to drive the overlay.
+  // 'loading'  — waiting for first position or permission answer
+  // 'granted'  — at least one position received (or user skipped)
+  // 'denied'   — watchPosition error (permission denied, unavailable, timeout)
+  const [gpsStatus, setGpsStatus] = useState<"loading" | "granted" | "denied">("loading");
+  // Incrementing this re-runs the watchPosition effect (retry after denial).
+  const [gpsAttempt, setGpsAttempt] = useState(0);
   // Becomes true once the first real GPS coordinate has been received.
   const [hasInitialPosition, setHasInitialPosition] = useState(false);
   // Latest GPS snapshot — drives the reactive camera effect.
@@ -801,7 +808,15 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // Camera movement is handled separately so it can react to cameraMode changes.
   //
   useEffect(() => {
-    if (!navigator.geolocation) return;
+    // If the Geolocation API is completely absent (e.g. insecure origin), bail out.
+    if (!navigator.geolocation) {
+      console.error("[GPS] navigator.geolocation is not available");
+      setGpsStatus("denied");
+      return;
+    }
+
+    // Reset to loading on each attempt so the overlay shows the spinner again.
+    setGpsStatus("loading");
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
@@ -823,6 +838,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         carPositionRef.current = [latitude, longitude];
         if (h != null && !isNaN(h)) headingRef.current = h;
 
+        // Mark permission as granted on the very first position received.
+        setGpsStatus("granted");
+
         // Only publish to React state when the fix is accurate enough to trust
         // (≤ 1000 m rejects IP-based guesses; accepts WiFi and GPS).
         // carPositionRef is always updated above so the 3D car never freezes.
@@ -830,12 +848,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current });
         }
       },
-      () => { /* geolocation denied — car stays at ME.location */ },
+      (err) => {
+        // Log every error so it is visible in DevTools / remote consoles.
+        console.error(`[GPS] watchPosition error — code ${err.code}: ${err.message}`);
+        setGpsStatus("denied");
+      },
       { enableHighAccuracy: true, maximumAge: 400 },
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, []); // mount-only; live values written via refs + setUserCoords
+  }, [gpsAttempt]); // gpsAttempt increments on user retry — restarts the watch
 
   // ── Reactive camera + circle-marker effect ────────────────────────────────────
   //
@@ -1278,13 +1300,41 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     <div className="relative sg-map-wrap h-full">
       <div ref={containerRef} className="sg-map h-full w-full" />
 
-      {/* GPS acquiring overlay — covers the neutral world-map until first real fix */}
+      {/* GPS overlay — shown until first real fix or user dismisses */}
       {!hasInitialPosition && (
         <div className="absolute inset-0 z-[9999] flex items-center justify-center bg-[#0e1015]">
-          <div className="text-center">
-            <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-700 border-t-cyan-400 mx-auto" />
-            <p className="text-sm font-medium text-gray-400">Поиск спутников GPS…</p>
-          </div>
+          {gpsStatus === "denied" ? (
+            /* ── Permission denied / unavailable ── */
+            <div className="text-center px-8 max-w-xs">
+              <div className="mb-5 h-14 w-14 mx-auto rounded-full bg-red-500/10 flex items-center justify-center">
+                <svg className="h-7 w-7 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+              </div>
+              <h2 className="text-white font-bold text-base mb-1">Доступ к геолокации не предоставлен</h2>
+              <p className="text-gray-500 text-xs mb-6 leading-relaxed">
+                Разрешите доступ к местоположению в настройках браузера, чтобы использовать навигацию.
+              </p>
+              <button
+                onClick={() => setGpsAttempt((n) => n + 1)}
+                className="w-full mb-3 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-sm transition"
+              >
+                Разрешить доступ
+              </button>
+              <button
+                onClick={() => setHasInitialPosition(true)}
+                className="w-full py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 font-medium text-sm transition"
+              >
+                Продолжить без GPS
+              </button>
+            </div>
+          ) : (
+            /* ── Acquiring fix ── */
+            <div className="text-center">
+              <div className="mb-4 h-12 w-12 animate-spin rounded-full border-4 border-gray-700 border-t-cyan-400 mx-auto" />
+              <p className="text-sm font-medium text-gray-400">Поиск спутников GPS…</p>
+            </div>
+          )}
         </div>
       )}
 
