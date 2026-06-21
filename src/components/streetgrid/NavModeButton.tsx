@@ -1,0 +1,31 @@
+import { Navigation } from "lucide-react";
+import type { NavMode } from "@/lib/streetgrid/navMode";
+import { NAV_MODE_ARIA } from "@/lib/streetgrid/navMode";
+
+type Props = {
+  mode:    NavMode;
+  onClick: () => void;
+};
+
+/** Circular GPS nav — icon only; state via data-nav (FREE / FOLLOW / DRIVE). */
+export function NavModeButton({ mode, onClick }: Props) {
+  const label = NAV_MODE_ARIA[mode];
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-nav={mode}
+      aria-label={label}
+      title={label}
+      className="sg-nav-btn shrink-0 grid place-items-center rounded-full border-2 backdrop-blur-md active:scale-95
+        h-[58px] w-[58px] sm:h-[60px] sm:w-[60px]"
+    >
+      <Navigation
+        className="sg-nav-icon h-6 w-6 sm:h-[26px] sm:w-[26px]"
+        style={mode !== "FREE" ? { fill: "currentColor" } : undefined}
+        strokeWidth={mode === "FREE" ? 1.85 : 2.25}
+      />
+    </button>
+  );
+}

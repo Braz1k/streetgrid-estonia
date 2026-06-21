@@ -1,24 +1,32 @@
 import { useState } from "react";
-import { ME, USERS } from "@/lib/streetgrid/data";
+import { USERS } from "@/lib/streetgrid/data";
 import { useStreetGrid } from "@/lib/streetgrid/store";
+import { getRankFromProgress } from "@/lib/streetgrid/reputation";
+import { RARITY_META } from "@/lib/streetgrid/vehicles";
+import { ReputationBadge } from "./ReputationBadge";
+import { ReputationPanel } from "./ReputationPanel";
 import { Gauge, Calendar, Wrench, Camera, Edit3 } from "lucide-react";
 import { GarageEditModal } from "./GarageEditModal";
 
 type Props = { viewUserId?: string | null; onBack?: () => void };
 
-export function GaragePanel({ viewUserId, onBack }: Props) {
-  const { profile, updateCar } = useStreetGrid();
+/** Social profile garage — real-world car metadata (viewing other users). */
+export function ProfileGaragePanel({ viewUserId, onBack }: Props) {
+  const { profile, updateCar, getEffectiveReputation } = useStreetGrid();
   const otherUser = viewUserId ? USERS.find((u) => u.id === viewUserId) : null;
   const isMe = !otherUser;
   const handle = isMe ? profile.handle : otherUser!.handle;
   const avatar = isMe ? profile.avatar : otherUser!.avatar;
   const status = isMe ? profile.status : otherUser!.status === "moving" ? "В движении" : "На споте";
   const car = isMe ? profile.car : otherUser!.car;
+  const reputation = isMe ? getEffectiveReputation() : otherUser!.reputation;
+  const rank = getRankFromProgress(reputation);
+  const rarity = isMe ? profile.rarity : otherUser!.rarity;
+  const rarityMeta = RARITY_META[rarity];
   const [editOpen, setEditOpen] = useState(false);
 
   return (
     <div className="pb-24 animate-float-up">
-      {/* Hero car visual */}
       <div className="relative h-56 bg-gradient-to-b from-primary/20 via-surface-2 to-background overflow-hidden">
         <div className="absolute inset-0 grid place-items-center text-[140px] opacity-90">{car.photos[0]}</div>
         <div className="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent" />
@@ -28,7 +36,7 @@ export function GaragePanel({ viewUserId, onBack }: Props) {
           </button>
         )}
         <div className="absolute bottom-3 right-3 glass-strong rounded-full px-3 py-1.5 text-[10px] font-bold tracking-widest text-nitro border border-nitro/40">
-          ● {status.toUpperCase()}
+          ● {String(status).toUpperCase()}
         </div>
       </div>
 
@@ -38,9 +46,22 @@ export function GaragePanel({ viewUserId, onBack }: Props) {
             <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-primary to-primary/30 grid place-items-center font-display font-black text-lg">
               {avatar}
             </div>
-            <div className="flex-1">
-              <div className="font-display font-black text-lg">{handle}</div>
-              <div className="text-xs text-muted-foreground">Tallinn · участник с 2023</div>
+            <div className="flex-1 min-w-0">
+              <div className="font-display font-black text-lg truncate">{handle}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                <ReputationBadge rank={rank} size="sm" />
+                <span
+                  className="inline-flex items-center text-[9px] font-black tracking-widest rounded-full border px-2 py-0.5"
+                  style={{
+                    color: rarityMeta.color,
+                    borderColor: rarityMeta.border,
+                    background: `${rarityMeta.color}18`,
+                  }}
+                >
+                  {rarityMeta.label.toUpperCase()}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">Tallinn · участник с 2023</div>
             </div>
             {isMe && (
               <button
@@ -65,6 +86,8 @@ export function GaragePanel({ viewUserId, onBack }: Props) {
             <Stat icon={Wrench} label="СПЕКОВ" value={String(car.specs.length)} />
           </div>
         </div>
+
+        <ReputationPanel progress={reputation} />
 
         <section className="glass rounded-2xl p-4">
           <h3 className="font-display font-black text-sm mb-3 flex items-center gap-2">
@@ -110,9 +133,6 @@ export function GaragePanel({ viewUserId, onBack }: Props) {
     </div>
   );
 }
-
-// Keep ME reference used to silence unused warning in case of tree-shaking
-void ME;
 
 function Stat({ icon: Icon, label, value, accent }: { icon: typeof Gauge; label: string; value: string; accent?: boolean }) {
   return (

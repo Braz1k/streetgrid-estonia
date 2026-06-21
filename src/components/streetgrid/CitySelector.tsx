@@ -10,8 +10,8 @@ type Props = {
 export function CitySelector({ value, onChange }: Props) {
 
   return (
-    <div className="sticky top-[48px] z-40 glass-strong border-b border-white/5">
-      <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 overflow-x-auto no-scrollbar">
+    <div className="sticky top-[var(--sg-header-height)] z-40 glass-strong border-b border-white/5">
+      <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1 overflow-x-auto no-scrollbar">
         <MapPin className="h-3 w-3 text-primary shrink-0" />
         {CITIES.map((c) => {
           const active = c.id === value;

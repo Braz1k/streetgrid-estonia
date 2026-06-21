@@ -5,16 +5,42 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import {
   USERS, SPOTS, MEETS, ME, getCity,
-  type SosSignal, type Spot, type SpotType, type CityId,
+  type UserProfile,
+  type SosSignal, type CityId,
 } from "@/lib/streetgrid/data";
+import { type Spot, getSpotRarityVisual } from "@/lib/streetgrid/spots";
+import { getRankFromProgress } from "@/lib/streetgrid/reputation";
+import { getVehicleLayerOpacity } from "@/lib/streetgrid/avatarVehicleTransition";
 import { useStreetGrid } from "@/lib/streetgrid/store";
+import { VEHICLE_CATALOG, RARITY_META, getPlayerLevel, getRarityRank, rarityFromRank, getVehicleById, getVehicleColorForSeed } from "@/lib/streetgrid/vehicles";
+import type { VehicleDefinition } from "@/lib/streetgrid/vehicles";
 import {
   Layers, Siren, Plus, Clock,
-  Route as RouteIcon, Search, ChevronUp, X,
-  Navigation, Building2,
+  Route as RouteIcon, Search, X,
+  Building,
 } from "lucide-react";
+import { NavModeButton } from "./NavModeButton";
+import type { NavMode } from "@/lib/streetgrid/navMode";
 import { SosModal, type SosPayload } from "./SosModal";
 import { AddSpotModal } from "./AddSpotModal";
+import { SpotDetailPanel } from "./SpotDetailPanel";
+import { getPlayerAvatarUrl } from "@/lib/streetgrid/avatars";
+import type { PlayerMarkerProps } from "./PlayerMarker";
+import {
+  mountPlayerClusterMarker,
+  unmountAllPlayerClusterMarkers,
+  updatePlayerClusterMarker,
+  animatePlayerClusterExpand,
+  type MountedPlayerCluster,
+} from "./playerClusterMount";
+import {
+  mountPlayerMarker,
+  unmountAllPlayerMarkers,
+  unmountPlayerMarker,
+  updatePlayerMarkerProps,
+  updatePlayerMarkersZoom,
+  type MountedPlayerMarker,
+} from "./playerMarkerMount";
 
 mapboxgl.accessToken =
   "pk.eyJ1IjoiMTEtMTEiLCJhIjoiY21xZTRrejF6MTdqNjJxcXpob2Fqc2c4OSJ9.JZTGEp-_QhQASnJTniUohQ";
@@ -34,41 +60,6 @@ const WAZE_ZOOM    = 16.5;
 const WAZE_PITCH   = 60;
 const WAZE_PADDING = { top: 410, bottom: 0, left: 0, right: 0 } as const;
 
-// ─── Garage cars ───────────────────────────────────────────────────────────────
-
-type GarageCar = {
-  id: string;
-  emoji: string;
-  name: string;
-  shortName: string;
-  description: string;
-  color: string;
-  modelPath: string; // path to .glb in /public; procedural fallback used if missing
-};
-
-const GARAGE_CARS: GarageCar[] = [
-  {
-    id: "bmw_m3", emoji: "🚗", name: "BMW M3 Competition", shortName: "BMW M3",
-    description: "480 л.с. · Stage 2 Tune · KW V3", color: "#00aaff",
-    modelPath: "/models/low_poly_bmw_g80_m3.glb",
-  },
-  {
-    id: "tesla_neon", emoji: "⚡", name: "Tesla Neon X", shortName: "Tesla",
-    description: "Электрогонщик · Silent Mode · 0–100 в 2.4 с", color: "#00ff88",
-    modelPath: "/models/tesla_neon.glb",
-  },
-  {
-    id: "retro_racer", emoji: "🏎️", name: "Retro Racer '69", shortName: "Ретро",
-    description: "Muscle Car · 1969 · V8 Big Block", color: "#ffcc00",
-    modelPath: "/models/retro_racer.glb",
-  },
-  {
-    id: "hippie_van", emoji: "🚐", name: "Hippie Van", shortName: "Хиппи",
-    description: "Peace & Love · Slow & Groovy", color: "#ff6600",
-    modelPath: "/models/hippie_van.glb",
-  },
-];
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type Props = {
@@ -87,30 +78,61 @@ type ActiveRoute = {
   name: string; distanceKm: number; durationMin: number;
 };
 
-const SPOT_VISUAL: Record<SpotType, { emoji: string }> = {
-  photo: { emoji: "📸" }, wash: { emoji: "💦" }, friendly: { emoji: "☕" },
-  parking: { emoji: "🅿️" }, landmark: { emoji: "📍" },
-};
-
 type MarkerRole = "user_regular" | "user_friend" | "club" | "party" | "legend" | "sos";
 
 const MARKER_THEMES: Record<MarkerRole, { border: string; glow: string; pulse: boolean }> = {
-  user_regular: { border: "#00ff66", glow: "0 0 12px rgba(0,255,102,0.65),0 0 32px rgba(0,255,102,0.3)",   pulse: false },
-  user_friend:  { border: "#0066ff", glow: "0 0 12px rgba(0,102,255,0.65),0 0 32px rgba(0,102,255,0.3)",   pulse: false },
-  club:         { border: "#cc00ff", glow: "0 0 12px rgba(204,0,255,0.65),0 0 32px rgba(204,0,255,0.3)",   pulse: true  },
-  party:        { border: "#ff6600", glow: "0 0 12px rgba(255,102,0,0.65),0 0 32px rgba(255,102,0,0.3)",   pulse: true  },
-  legend:       { border: "#ffcc00", glow: "0 0 12px rgba(255,204,0,0.65),0 0 32px rgba(255,204,0,0.3)",   pulse: false },
-  sos:          { border: "#ff0033", glow: "0 0 14px rgba(255,0,51,0.75),0 0 36px rgba(255,0,51,0.4)",     pulse: true  },
+  user_regular: { border: "#00ff88", glow: "0 0 14px rgba(0,255,136,0.75),0 0 36px rgba(0,255,136,0.38),inset 0 0 8px rgba(0,255,136,0.12)", pulse: false },
+  user_friend:  { border: "#3399ff", glow: "0 0 14px rgba(51,153,255,0.75),0 0 36px rgba(51,153,255,0.38),inset 0 0 8px rgba(51,153,255,0.12)", pulse: false },
+  club:         { border: "#dd44ff", glow: "0 0 16px rgba(221,68,255,0.8),0 0 40px rgba(221,68,255,0.42),inset 0 0 10px rgba(221,68,255,0.15)", pulse: true  },
+  party:        { border: "#ff7722", glow: "0 0 16px rgba(255,119,34,0.8),0 0 40px rgba(255,119,34,0.42),inset 0 0 10px rgba(255,119,34,0.15)", pulse: true  },
+  legend:       { border: "#ffdd33", glow: "0 0 16px rgba(255,221,51,0.8),0 0 40px rgba(255,221,51,0.42),inset 0 0 10px rgba(255,221,51,0.15)", pulse: false },
+  sos:          { border: "#ff0033", glow: "0 0 8px rgba(255,0,51,0.45),0 0 22px rgba(255,0,51,0.24)", pulse: true  },
 };
 
-const SPOT_ROLE: Record<SpotType, MarkerRole> = {
-  photo: "club", friendly: "user_friend", wash: "club",
-  parking: "user_regular", landmark: "legend",
-};
+/** Individual player markers expand at this zoom and above. */
+const PLAYER_EXPAND_ZOOM = 13;
+/** Mapbox clusters players when zoom <= this value (i.e. zoom < 13). */
+const PLAYER_CLUSTER_MAX_ZOOM = PLAYER_EXPAND_ZOOM - 1;
+/** 10+ players show avatar stack inside cluster badge. */
+const STACK_MIN_COUNT = 10;
 
-function userRole(id: string): MarkerRole {
-  return id === "u2" ? "user_friend" : "user_regular";
+function distKm(a: [number, number], b: [number, number]): number {
+  const [lat1, lng1] = a;
+  const [lat2, lng2] = b;
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const x =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
+
+function getOnlinePlayersForMap(city: CityId): UserProfile[] {
+  if (city !== "tallinn" && city !== "all") return [];
+  return USERS.filter((u) => u.status !== "offline");
+}
+
+function playersToGeoJson(users: UserProfile[]): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: users.map((u) => ({
+      type: "Feature" as const,
+      geometry: { type: "Point" as const, coordinates: toLngLat(u.location) },
+      properties: {
+        id: u.id,
+        rarity: u.rarity,
+        rarity_rank: getRarityRank(u.rarity),
+      },
+    })),
+  };
+}
+
+const STATUS_LABEL: Record<UserProfile["status"], string> = {
+  moving:  "В движении",
+  spot:    "На споте",
+  offline: "Оффлайн",
+};
 
 const routeBtnHtml = (id: string) =>
   `<button data-route="${id}" style="margin-top:6px;background:#00f0ff;color:#001;padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px">🧭 ПОЕХАЛИ</button>`;
@@ -313,6 +335,87 @@ function createProceduralCar(carId: string, colorHex: string): THREE.Group {
 //          θ=0  → (0, s, 0)  = north ✓
 //          θ=π/2→ (s, 0, 0)  = east  ✓
 //
+// Fixed visual boost on top of Mapbox's meter scale — world-locked, zoom-independent.
+const CAR_MODEL_SCALE = 1.55;
+const CAR_TARGET_LENGTH_M = 4.0;
+
+/** Scale any vehicle mesh so its largest axis equals CAR_TARGET_LENGTH_M. */
+function normalizeVehicleModel(model: THREE.Object3D, targetLengthM = CAR_TARGET_LENGTH_M) {
+  const box = new THREE.Box3().setFromObject(model);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  if (maxDim > 0) model.scale.setScalar(targetLengthM / maxDim);
+}
+
+// Vehicle navigation glow — local metres (model normalised to ~4 m length).
+// Glow is parented inside carContentGroup so it moves/rotates with the vehicle.
+const CAR_LENGTH_M        = CAR_TARGET_LENGTH_M;
+const GLOW_OUTER_RADIUS_M = CAR_LENGTH_M * 1.75; // large soft halo
+const GLOW_INNER_RADIUS_M = CAR_LENGTH_M * 0.38; // small bright core
+const GLOW_OUTER_OPACITY  = 0.25;                // 0.2–0.3 soft outer
+const GLOW_INNER_OPACITY  = 0.38;                // bright inner core
+const GLOW_COLOR          = 0x00f3ff;
+
+/** Canvas radial gradient for outer halo or bright inner core. */
+function createVehicleGlowTexture(variant: "outer" | "inner"): THREE.CanvasTexture {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const half = size / 2;
+  const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
+  if (variant === "outer") {
+    grad.addColorStop(0,    "rgba(0, 243, 255, 0.55)");
+    grad.addColorStop(0.35, "rgba(0, 243, 255, 0.28)");
+    grad.addColorStop(0.7,  "rgba(0, 243, 255, 0.08)");
+    grad.addColorStop(1,    "rgba(0, 243, 255, 0)");
+  } else {
+    grad.addColorStop(0,    "rgba(200, 255, 255, 0.95)");
+    grad.addColorStop(0.4,  "rgba(0, 243, 255, 0.55)");
+    grad.addColorStop(1,    "rgba(0, 243, 255, 0)");
+  }
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+
+function createVehicleGlowMesh(radius: number, variant: "outer" | "inner", renderOrder: number): THREE.Mesh {
+  const baseOpacity = variant === "outer" ? GLOW_OUTER_OPACITY : GLOW_INNER_OPACITY;
+  const mesh = new THREE.Mesh(
+    new THREE.CircleGeometry(radius, 48),
+    new THREE.MeshBasicMaterial({
+      map:         createVehicleGlowTexture(variant),
+      color:       GLOW_COLOR,
+      transparent: true,
+      opacity:     baseOpacity,
+      depthWrite:  false,
+      blending:    THREE.AdditiveBlending,
+      side:        THREE.DoubleSide,
+    }),
+  );
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = 0.03;
+  mesh.renderOrder = renderOrder;
+  mesh.userData.isVehicleGlowPart = true;
+  mesh.userData.glowVariant = variant;
+  return mesh;
+}
+
+/** Dual-layer cyan glow — child of the vehicle render group, below the mesh. */
+function createVehicleGlow(): {
+  group:     THREE.Group;
+  outerGlow: THREE.Mesh;
+  innerGlow: THREE.Mesh;
+} {
+  const group = new THREE.Group();
+  group.userData.isVehicleGlow = true;
+  const outerGlow = createVehicleGlowMesh(GLOW_OUTER_RADIUS_M, "outer", -2);
+  const innerGlow = createVehicleGlowMesh(GLOW_INNER_RADIUS_M, "inner", -1);
+  group.add(outerGlow, innerGlow);
+  return { group, outerGlow, innerGlow };
+}
+
 class CarLayer {
   readonly id            = "user-car-3d";
   readonly type          = "custom" as const;
@@ -322,19 +425,24 @@ class CarLayer {
   private renderer!:      THREE.WebGLRenderer;
   private scene!:         THREE.Scene;
   private camera!:        THREE.Camera;
-  private carGroup!:      THREE.Group;
+  private carGroup!:           THREE.Group;
+  private carContentGroup!:    THREE.Group;
+  private carModelGroup!:      THREE.Group;
+  private vehicleGlowGroup!:   THREE.Group;
+  private vehicleOuterGlow!:   THREE.Mesh;
+  private vehicleInnerGlow!:   THREE.Mesh;
   private smoothHeading = 0;
-  private smoothScale   = 3.2; // start at the navigation-zoom value; lerps like heading
+  private glowPulsePhase  = 0;
   private currentCarId:   string;
 
-  private readonly cars:       GarageCar[];
+  private readonly cars:       VehicleDefinition[];
   private readonly posRef:     { current: [number, number] };
   private readonly headingRef: { current: number };
   private _lastOpacity = -1; // cached so material traversal only runs when opacity changes
 
   constructor(
     initialCarId: string,
-    cars:         GarageCar[],
+    cars:         VehicleDefinition[],
     posRef:       { current: [number, number] },
     headingRef:   { current: number },
   ) {
@@ -370,12 +478,22 @@ class CarLayer {
     this.scene.add(fill);
 
     this.carGroup = new THREE.Group();
+    this.carContentGroup = new THREE.Group();
+    this.carModelGroup   = new THREE.Group();
+    const glow = createVehicleGlow();
+    this.vehicleGlowGroup = glow.group;
+    this.vehicleOuterGlow = glow.outerGlow;
+    this.vehicleInnerGlow = glow.innerGlow;
+    // Glow lives inside the vehicle render group — moves/rotates with the body.
+    this.carContentGroup.add(this.vehicleGlowGroup);
+    this.carContentGroup.add(this.carModelGroup);
+    this.carGroup.add(this.carContentGroup);
     this.scene.add(this.carGroup);
 
     this.loadCar(this.currentCarId);
   }
 
-  private getCar(id: string): GarageCar {
+  private getCar(id: string): VehicleDefinition {
     return this.cars.find(c => c.id === id) ?? this.cars[0];
   }
 
@@ -387,22 +505,21 @@ class CarLayer {
     loader.load(
       car.modelPath,
       (gltf) => {
-        this.carGroup.clear();
+        this.carModelGroup.clear();
         const model = gltf.scene;
-        // Normalise GLTF model to ~4 m length
-        const box  = new THREE.Box3().setFromObject(model);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const maxDim = Math.max(size.x, size.y, size.z);
-        if (maxDim > 0) model.scale.setScalar(4 / maxDim);
-        this.carGroup.add(model);
+        normalizeVehicleModel(model);
+        this.carModelGroup.add(model);
+        this._alignGlowToVehicle();
         this._map.triggerRepaint();
       },
       undefined,
       () => {
         // .glb not found → procedural fallback (always available)
-        this.carGroup.clear();
-        this.carGroup.add(createProceduralCar(car.id, car.color));
+        this.carModelGroup.clear();
+        const model = createProceduralCar(car.id, car.color);
+        normalizeVehicleModel(model);
+        this.carModelGroup.add(model);
+        this._alignGlowToVehicle();
         this._map.triggerRepaint();
       },
     );
@@ -412,25 +529,33 @@ class CarLayer {
     if (carId !== this.currentCarId) this.loadCar(carId);
   }
 
-  // ── Zoom-adaptive helpers ─────────────────────────────────────────────────
-
-  // Scale multiplier applied on top of meterInMercatorCoordinateUnits().
-  // 4× the original baseline so the car is wide and unmissable among 3D buildings.
-  private _getZoomScale(zoom: number): number {
-    if (zoom <= 14) return 24.0;
-    if (zoom <= 16) return 24.0 + (zoom - 14) / 2 * (10.0 - 24.0); // lerp 24.0→10.0
-    if (zoom <= 18) return 10.0 + (zoom - 16) / 2 * (3.2 - 10.0);  // lerp 10.0→3.2
-    if (zoom <= 19) return 3.2  + (zoom - 18) / 1 * (1.6 - 3.2);   // lerp 3.2→1.6
-    return 1.6;
+  /** Centre glow under the vehicle mesh bbox (XZ). */
+  private _alignGlowToVehicle() {
+    const box = new THREE.Box3().setFromObject(this.carModelGroup);
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    this.vehicleGlowGroup.position.set(center.x, 0, center.z);
   }
 
-  // 3D model fades in zoom 14.8 → 15.2 (mirrors circle fade-out below).
-  // Below 14.8: invisible — circle marker has full responsibility.
-  // Above 15.2: fully opaque — circle has finished fading out.
+  /** Subtle pulse on glow opacity and outer radius. */
+  private _updateGlowPulse(zoomOpacity: number) {
+    this.glowPulsePhase += 0.04;
+    const pulse = 0.88 + 0.12 * Math.sin(this.glowPulsePhase);
+
+    const outerMat = this.vehicleOuterGlow.material as THREE.MeshBasicMaterial;
+    const innerMat = this.vehicleInnerGlow.material as THREE.MeshBasicMaterial;
+
+    outerMat.opacity = zoomOpacity * GLOW_OUTER_OPACITY * pulse;
+    innerMat.opacity = zoomOpacity * GLOW_INNER_OPACITY * (0.92 + 0.08 * pulse);
+
+    const outerScale = 0.96 + 0.04 * pulse;
+    this.vehicleOuterGlow.scale.set(outerScale, outerScale, 1);
+    this.vehicleInnerGlow.scale.set(0.94 + 0.06 * pulse, 0.94 + 0.06 * pulse, 1);
+  }
+
+  // Social markers fade 15→16; 3D vehicle takes over above zoom 16.
   private _getZoomOpacity(zoom: number): number {
-    if (zoom <= 14.8) return 0.0;
-    if (zoom >= 15.2) return 1.0;
-    return (zoom - 14.8) / 0.4; // linear 0→1 across the 0.4-zoom window
+    return getVehicleLayerOpacity(zoom);
   }
 
   render(_gl: WebGLRenderingContext, matrix: number[]) {
@@ -442,43 +567,58 @@ class CarLayer {
     if (Math.abs(opacity - this._lastOpacity) > 0.005) {
       this._lastOpacity = opacity;
       this.carGroup.traverse((obj) => {
-        if ((obj as THREE.Mesh).isMesh) {
-          const mats = Array.isArray((obj as THREE.Mesh).material)
-            ? ((obj as THREE.Mesh).material as THREE.Material[])
-            : [(obj as THREE.Mesh).material as THREE.Material];
-          mats.forEach((m) => { m.opacity = opacity; m.transparent = opacity < 1.0; });
-        }
+        if (!(obj as THREE.Mesh).isMesh) return;
+        if ((obj as THREE.Mesh).userData.isVehicleGlowPart) return;
+        const mats = Array.isArray((obj as THREE.Mesh).material)
+          ? ((obj as THREE.Mesh).material as THREE.Material[])
+          : [(obj as THREE.Mesh).material as THREE.Material];
+        mats.forEach((m) => { m.opacity = opacity; m.transparent = opacity < 1.0; });
       });
     }
+    const glowVisible = opacity > 0;
+    this.vehicleGlowGroup.visible = glowVisible;
+    if (glowVisible) this._updateGlowPulse(opacity);
 
-    // Circle marker takes over below zoom 15 — skip WebGL draw entirely.
+    // Avatar marker visible below crossfade — skip WebGL draw when fully faded.
     if (opacity <= 0.0) return;
 
     // Smooth heading interpolation — Waze-style gradual turn
     const dh          = ((this.headingRef.current - this.smoothHeading + 540) % 360) - 180;
     this.smoothHeading = (this.smoothHeading + dh * 0.12 + 360) % 360;
 
-    // Smooth scale interpolation — prevents the car from appearing to drift
-    // during zoom animations when _getZoomScale changes rapidly each frame.
-    // Same lerp pattern as heading; 0.08 keeps it snappy without snapping.
-    const targetScale  = this._getZoomScale(zoom);
-    this.smoothScale   = this.smoothScale + (targetScale - this.smoothScale) * 0.08;
-
     const [lat, lng] = this.posRef.current;
     const mercator   = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
-    const rawS       = mercator.meterInMercatorCoordinateUnits();
-    const s          = rawS * this.smoothScale; // smoothed zoom-compensated scale
+    const scale      = mercator.meterInMercatorCoordinateUnits() * CAR_MODEL_SCALE;
 
     const headingRad  = (this.smoothHeading * Math.PI) / 180;
     const modelMatrix = new THREE.Matrix4()
       .makeTranslation(mercator.x, mercator.y, mercator.z)
-      .scale(new THREE.Vector3(s, -s, s))
+      .scale(new THREE.Vector3(scale, -scale, scale))
       .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2))
       .multiply(new THREE.Matrix4().makeRotationY(headingRad));
 
     this.camera.projectionMatrix = new THREE.Matrix4().fromArray(matrix).multiply(modelMatrix);
 
     this.renderer.resetState();
+
+    // ── Depth-buffer clear ────────────────────────────────────────────────────
+    // Mapbox has already written 3-D building geometry into the depth buffer.
+    // resetState() re-enables depth testing, so without this clear the car
+    // fragments that sit "inside" a building fail the depth test and are
+    // discarded → car invisible behind tall buildings.
+    //
+    // Clearing ONLY the depth buffer (not colour) before Three.js renders means:
+    //   • The car never gets clipped by building geometry (always visible).
+    //   • Three.js still uses depth testing for the car's *own* geometry, so
+    //     back-of-car remains behind front-of-car (self-occlusion is correct).
+    //   • The car layer is last in the Mapbox stack, so no subsequent WebGL
+    //     layers are harmed by the now-cleared depth values.
+    //
+    // This is the approach Mapbox's own custom-layer examples recommend for
+    // user-location indicators that must always be on top.
+    const gl = this.renderer.getContext() as WebGLRenderingContext;
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+
     this.renderer.render(this.scene, this.camera);
     this._map.triggerRepaint(); // continuous repaint drives smooth heading lerp
   }
@@ -492,15 +632,21 @@ class CarLayer {
 
 // ─── HTML marker helpers ──────────────────────────────────────────────────────
 
+type MarkerOpts = {
+  extraStyle?: Partial<CSSStyleDeclaration>;
+};
+
 function makeMarkerEl(
   html: string, role: MarkerRole, size = 36,
-  extraStyle: Partial<CSSStyleDeclaration> = {},
+  opts: MarkerOpts = {},
 ): HTMLDivElement {
   const theme = MARKER_THEMES[role];
   const wrap  = document.createElement("div");
   wrap.className = "sg-marker-wrap";
+  if (role === "sos") wrap.classList.add("sg-marker-wrap--sos");
   wrap.style.width  = `${size}px`;
   wrap.style.height = `${size}px`;
+  wrap.style.setProperty("--marker-accent", theme.border);
 
   if (theme.pulse) {
     wrap.classList.add("sg-marker-pulse");
@@ -519,24 +665,104 @@ function makeMarkerEl(
   el.style.fontSize    = `${Math.round(size * 0.5)}px`;
   el.style.borderColor = theme.border;
   el.style.boxShadow   = theme.glow;
-  Object.assign(el.style, extraStyle);
+  Object.assign(el.style, opts.extraStyle ?? {});
   el.innerHTML = html;
   wrap.appendChild(el);
   return wrap;
 }
 
+function makeSpotMarkerEl(spot: Spot, onClick: () => void): HTMLDivElement {
+  const visual = getSpotRarityVisual(spot.rarity);
+  const wrap   = document.createElement("div");
+  wrap.className = `sg-spot-rarity sg-spot-rarity--${spot.rarity} sg-spot-float`;
+  wrap.style.setProperty("--spot-color", visual.color);
+
+  if (visual.pulse) {
+    for (const delay of ["", " sg-spot-rarity__ring--delay"]) {
+      const ring = document.createElement("span");
+      ring.className = `sg-spot-rarity__ring${delay}`;
+      wrap.appendChild(ring);
+    }
+  }
+
+  const halo = document.createElement("span");
+  halo.className = "sg-spot-rarity__halo";
+  wrap.appendChild(halo);
+
+  const core = document.createElement("button");
+  core.type = "button";
+  core.className = "sg-spot-rarity__core";
+  core.style.borderColor = visual.color;
+  core.style.boxShadow   = visual.glow;
+  core.textContent = spot.icon;
+  core.title = spot.name;
+  core.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
+  wrap.appendChild(core);
+
+  return wrap;
+}
+
+function userToMarkerProps(u: UserProfile): PlayerMarkerProps {
+  return {
+    avatar: getPlayerAvatarUrl(u),
+    nickname: u.handle,
+    level: u.level,
+    rarity: u.rarity,
+    vehicleColor: getVehicleColorForSeed(u.id),
+    isOnline: u.status !== "offline",
+    isCurrentUser: false,
+  };
+}
+
+function selfToMarkerProps(
+  handle: string,
+  rarity: UserProfile["rarity"],
+  level: number,
+  vehicleColor: string,
+): PlayerMarkerProps {
+  return {
+    avatar: getPlayerAvatarUrl({ id: "me", handle }),
+    nickname: handle,
+    level,
+    rarity,
+    vehicleColor,
+    isOnline: true,
+    isCurrentUser: true,
+  };
+}
+
+function playerPopupHtml(user: UserProfile): string {
+  const vehicle = `${user.car.year} ${user.car.make} ${user.car.model}`;
+  const rank    = getRankFromProgress(user.reputation);
+  const rarity  = RARITY_META[user.rarity];
+  const avatar  = getPlayerAvatarUrl(user);
+  const onlineClass = user.status === "offline" ? "sg-player-popup__dot--offline" : "sg-player-popup__dot--online";
+  return (
+    `<div class="sg-player-popup">` +
+    `<div class="sg-player-popup__head sg-player-popup__head--avatar">` +
+    `<img class="sg-player-popup__avatar" src="${avatar}" alt="" style="border-color:${rarity.color}88;box-shadow:0 0 12px ${rarity.color}33" />` +
+    `<div>` +
+    `<span class="sg-player-popup__handle">${user.handle}</span>` +
+    `<span class="sg-player-popup__online"><span class="sg-player-popup__dot ${onlineClass}"></span>${STATUS_LABEL[user.status]}</span>` +
+    `</div></div>` +
+    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Редкость</span>` +
+    `<span class="sg-player-popup__value" style="color:${rarity.color}">${rarity.label.toUpperCase()}</span></div>` +
+    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Ранг</span>` +
+    `<span class="sg-player-popup__value sg-player-popup__rank" style="color:${rank.color}">${rank.label.toUpperCase()}</span></div>` +
+    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Уровень</span><span class="sg-player-popup__value sg-player-popup__value--accent">LVL ${user.level}</span></div>` +
+    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Авто</span><span class="sg-player-popup__value">${vehicle}</span></div>` +
+    `<button data-garage="${user.id}" class="sg-player-popup__btn">Открыть гараж</button>` +
+    `</div>`
+  );
+}
+
 function makeClusterEl(count: number): HTMLDivElement {
   const size = count < 5 ? 44 : count < 20 ? 52 : 60;
   const el   = document.createElement("div");
-  el.className = "sg-cluster-marker";
-  Object.assign(el.style, {
-    width: `${size}px`, height: `${size}px`, borderRadius: "50%",
-    background: "rgba(8,10,20,0.88)", border: "2px solid #00f0ff",
-    boxShadow: "0 0 12px rgba(0,240,255,0.65),0 0 28px rgba(0,240,255,0.35),inset 0 0 8px rgba(0,240,255,0.15)",
-    display: "flex", alignItems: "center", justifyContent: "center",
-    color: "#fff", fontWeight: "800", fontSize: "13px", cursor: "pointer", userSelect: "none",
-  });
-  el.textContent = String(count);
+  el.className = "sg-cluster-marker sg-cluster-live";
+  el.style.width  = `${size}px`;
+  el.style.height = `${size}px`;
+  el.textContent  = String(count);
   return el;
 }
 
@@ -545,20 +771,22 @@ function makeClusterEl(count: number): HTMLDivElement {
 // FREE  — user owns the camera; GPS does not interfere
 // FOLLOW — camera centres on car each tick; pitch & bearing freely adjustable
 // DRIVE  — full Waze: pitch 65, bearing = heading, car in lower third (WAZE_PADDING)
-type NavMode = "FREE" | "FOLLOW" | "DRIVE";
-
-// navMode is the single source of truth for all GPS camera behavior.
+// NavMode type + cycle live in @/lib/streetgrid/navMode
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) {
-  const { profile, settings, pushChat } = useStreetGrid();
+  const { settings, pushChat, selectedCarId, profile, vehicleProgress, addDrivingDistance, recordSpotVisit, recordEvent } = useStreetGrid();
 
   const containerRef         = useRef<HTMLDivElement>(null);
   const mapRef               = useRef<mapboxgl.Map | null>(null);
   const featureMarkersRef    = useRef<mapboxgl.Marker[]>([]);
+  const playerMarkersRef     = useRef<MountedPlayerMarker[]>([]);
+  const playerClusterMarkersRef = useRef<Record<string, MountedPlayerCluster>>({});
+  const playerRenderCleanupRef  = useRef<(() => void) | null>(null);
+  const selfMarkerRef        = useRef<MountedPlayerMarker | null>(null);
   const spotMarkersRef       = useRef<Record<string, mapboxgl.Marker>>({});
-  const botMarkersRef        = useRef<mapboxgl.Marker[]>([]);
+  const botMarkersRef        = useRef<MountedPlayerMarker[]>([]);
   const sosMarkersRef        = useRef<mapboxgl.Marker[]>([]);
   const spotRenderCleanupRef = useRef<(() => void) | null>(null);
   // 3D car layer — created in map.on('load'), swapped on garage selection
@@ -574,11 +802,12 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [addOpen,       setAddOpen]       = useState(false);
   const [signals,       setSignals]       = useState<SosSignal[]>([]);
   const [userSpots,     setUserSpots]     = useState<Spot[]>([]);
+  const [selectedSpot,  setSelectedSpot]  = useState<Spot | null>(null);
+  const onSpotSelectRef = useRef<(s: Spot) => void>(() => {});
+  onSpotSelectRef.current = (s) => setSelectedSpot(s);
   const [activeRoute,   setActiveRoute]   = useState<ActiveRoute | null>(null);
   const [layers,        setLayers]        = useState({ users: true, spots: true, meets: true });
   const [bots,          setBots]          = useState<Bot[]>([]);
-  const [selectedCarId, setSelectedCarId] = useState<string>(GARAGE_CARS[0].id);
-  const [carSheetOpen,  setCarSheetOpen]  = useState(false);
   const [searchOpen,    setSearchOpen]    = useState(false);
   // GPS permission / availability status used to drive the overlay.
   // 'loading'  — waiting for first position or permission answer
@@ -614,8 +843,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const allSpots     = [...SPOTS, ...userSpots];
   const visibleSpots = city === "all" ? allSpots : allSpots.filter((s) => s.city === city);
   const visibleMeets = city === "all" ? MEETS : MEETS.filter((m) => m.city === city);
-  const selectedCar  = GARAGE_CARS.find((c) => c.id === selectedCarId) ?? GARAGE_CARS[0];
-
   // ── Garage selection → swap 3D model ─────────────────────────────────────────
   useEffect(() => {
     carLayerRef.current?.swapCar(selectedCarId);
@@ -652,6 +879,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
       // Waze camera padding — persists across all camera moves
       map.setPadding(WAZE_PADDING);
+
+      // Soft atmospheric depth between distant buildings — dark cyber palette
+      map.setFog({
+        color:          "rgb(10, 12, 20)",
+        "high-color":   "rgb(22, 26, 40)",
+        "horizon-blend": 0.04,
+        "space-color":  "rgb(6, 8, 14)",
+        "star-intensity": 0,
+        range:          [0.8, 12],
+      });
 
       // Re-enforce pitch if user pinch-zooms it away
       map.on("pitchend", () => {
@@ -720,50 +957,20 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         cluster: true, clusterMaxZoom: 14, clusterRadius: 50,
       });
 
-      // ── User position source + far-zoom circle marker ────────────────────────
-      //
-      // A lightweight GeoJSON Point source that is updated on every GPS fix
-      // (see watchPosition below).  The circle layer is visible at zoom < 16
-      // and fades out exactly as the 3D model fades in (zoom 15→16), so the
-      // user is always visible whether they're zoomed out or in navigation mode.
-      //
-      map.addSource("user-position-source", {
+      map.addSource("players", {
         type: "geojson",
-        data: {
-          type: "Feature",
-          geometry: { type: "Point", coordinates: toLngLat(ME.location) },
-          properties: {},
+        data: { type: "FeatureCollection", features: [] },
+        cluster: true,
+        clusterMaxZoom: PLAYER_CLUSTER_MAX_ZOOM,
+        clusterRadius: 52,
+        clusterProperties: {
+          max_rarity_rank: ["max", ["get", "rarity_rank"]],
         },
-      });
-
-      map.addLayer({
-        id:     "user-avatar-far-layer",
-        type:   "circle",
-        source: "user-position-source",
-        paint: {
-          "circle-radius":          14,
-          "circle-color":           "#ff0055",
-          "circle-stroke-width":    2,
-          "circle-stroke-color":    "#ffffff",
-          // Keep the dot upright in viewport space so it doesn't stretch at pitch
-          "circle-pitch-alignment": "viewport",
-          // Mirror the 3D model's fade-in: circle disappears zoom 14.8 → 15.2
-          "circle-opacity": [
-            "interpolate", ["linear"], ["zoom"],
-            14.8, 1.0,
-            15.2, 0.0,
-          ] as any,
-          "circle-stroke-opacity": [
-            "interpolate", ["linear"], ["zoom"],
-            14.8, 1.0,
-            15.2, 0.0,
-          ] as any,
-        } as any,
       });
 
       // ── 3D car layer (Three.js custom layer) ───────────────────────────────
       const layer = new CarLayer(
-        GARAGE_CARS[0].id, GARAGE_CARS, carPositionRef, headingRef,
+        VEHICLE_CATALOG[0].id, VEHICLE_CATALOG, carPositionRef, headingRef,
       );
       carLayerRef.current = layer;
       map.addLayer(layer as unknown as mapboxgl.CustomLayerInterface);
@@ -828,8 +1035,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         let h: number | null = heading;
 
         // Compute bearing from position delta when device heading is unavailable
-        if ((h == null || isNaN(h)) && prevPosRef.current) {
-          const [pLat, pLng] = prevPosRef.current;
+        const prev = prevPosRef.current;
+        if (prev) {
+          const km = distKm(prev, [latitude, longitude]);
+          if (km >= 0.003) addDrivingDistance(km);
+        }
+        if ((h == null || isNaN(h)) && prev) {
+          const [pLat, pLng] = prev;
           const dLat = latitude - pLat;
           const dLng = longitude - pLng;
           if (Math.hypot(dLat, dLng) > 0.00005) {
@@ -871,7 +1083,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [gpsAttempt]); // gpsAttempt increments on user retry — restarts the watch
+  }, [gpsAttempt, addDrivingDistance]); // gpsAttempt increments on user retry — restarts the watch
 
   // ── Reactive GPS camera effect ────────────────────────────────────────────────
   //
@@ -890,11 +1102,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const map = mapRef.current;
     if (!map || !userCoords) return;
 
-    // 1. Circle marker always tracks live GPS position.
-    (map.getSource("user-position-source") as mapboxgl.GeoJSONSource | undefined)
-      ?.setData({ type: "Feature", geometry: { type: "Point", coordinates: [userCoords.lng, userCoords.lat] }, properties: {} });
-
-    // 2. First GPS fix — fly from Tallinn overview to user's street-level position.
+    // First GPS fix — fly from Tallinn overview to user's street-level position.
     if (!hasInitialPosition) {
       setHasInitialPosition(true);
       setNavMode("DRIVE");
@@ -1063,32 +1271,217 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const clearRoute   = useCallback(() => { setRouteGeoJson(null); setActiveRoute(null); }, [setRouteGeoJson]);
   const triggerRoute = useCallback((c: [number, number], n: string) => runRouteTo(c, n), [runRouteTo]);
 
-  // ── Feature markers (other users + meets) ────────────────────────────────────
+  // ── Live players: cluster below zoom 13, individuals at zoom >= 13 ───────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+
+    playerRenderCleanupRef.current?.();
+    playerRenderCleanupRef.current = null;
+
+    const source = map.getSource("players") as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
+
+    const onlineUsers = getOnlinePlayersForMap(city);
+    const usersById: Record<string, UserProfile> = {};
+    onlineUsers.forEach((u) => { usersById[u.id] = u; });
+
+    source.setData(
+      layers.users ? playersToGeoJson(onlineUsers) : { type: "FeatureCollection", features: [] },
+    );
+
+    const clearPlayerMarkers = () => {
+      unmountAllPlayerMarkers(playerMarkersRef.current);
+      playerMarkersRef.current = [];
+      unmountAllPlayerClusterMarkers(playerClusterMarkersRef.current);
+      playerClusterMarkersRef.current = {};
+    };
+
+    const fitClusterBounds = (clusterId: number, entry: MountedPlayerCluster) => {
+      const zoomToCluster = () => {
+        source.getClusterLeaves(clusterId, 100, 0, (err, leaves) => {
+          if (err || !leaves?.length) return;
+          const bounds = new mapboxgl.LngLatBounds();
+          for (const leaf of leaves) {
+            bounds.extend((leaf.geometry as GeoJSON.Point).coordinates as [number, number]);
+          }
+          setNavMode("FREE");
+          isProgrammaticRef.current = true;
+          map.fitBounds(bounds, {
+            padding: 80,
+            maxZoom: PLAYER_EXPAND_ZOOM,
+            duration: 720,
+            easing: (t) => t * (2 - t),
+          });
+          window.setTimeout(() => {
+            isProgrammaticRef.current = false;
+          }, 750);
+        });
+      };
+      animatePlayerClusterExpand(entry, zoomToCluster);
+    };
+
+    const renderPlayers = () => {
+      if (!map.isStyleLoaded()) return;
+      clearPlayerMarkers();
+      if (!layers.users || (city !== "tallinn" && city !== "all")) return;
+
+      const zoom = map.getZoom();
+      const clusterMode = zoom < PLAYER_EXPAND_ZOOM;
+      const features = map.querySourceFeatures("players");
+      const seen = new Set<string>();
+
+      for (const feature of features) {
+        const props = feature.properties;
+        if (!props) continue;
+        const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
+
+        if (clusterMode && props.point_count != null) {
+          const clusterId = props.cluster_id as number;
+          const key = `cluster-${clusterId}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const count = Number(props.point_count);
+          const rarity = rarityFromRank(Number(props.max_rarity_rank ?? 0));
+          const entry = mountPlayerClusterMarker(
+            map,
+            coords,
+            { count, rarity, avatarUrls: [] },
+            () => fitClusterBounds(clusterId, entry),
+          );
+          playerClusterMarkersRef.current[key] = entry;
+
+          if (count >= STACK_MIN_COUNT) {
+            source.getClusterLeaves(clusterId, 3, 0, (err, leaves) => {
+              if (err || !leaves) return;
+              const avatarUrls = leaves
+                .map((leaf) => {
+                  const id = String(leaf.properties?.id ?? "");
+                  const user = usersById[id];
+                  return user ? getPlayerAvatarUrl(user) : "";
+                })
+                .filter(Boolean);
+              updatePlayerClusterMarker(entry, { count, rarity, avatarUrls });
+            });
+          }
+          continue;
+        }
+
+        const id = String(props.id);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const user = usersById[id];
+        if (!user) continue;
+
+        if (clusterMode) {
+          const entry = mountPlayerMarker(map, coords, userToMarkerProps(user));
+          playerMarkersRef.current.push(entry);
+          continue;
+        }
+
+        const popup = new mapboxgl.Popup({ offset: 28, className: "sg-player-popup-wrap" })
+          .setHTML(playerPopupHtml(user));
+        popup.on("open", () => setTimeout(() => {
+          document.querySelector<HTMLButtonElement>(`button[data-garage="${user.id}"]`)
+            ?.addEventListener("click", () => onOpenGarage(user.id));
+        }, 0));
+        const entry = mountPlayerMarker(map, coords, userToMarkerProps(user), popup);
+        playerMarkersRef.current.push(entry);
+      }
+
+      updatePlayerMarkersZoom(playerMarkersRef.current, zoom);
+    };
+
+    const onZoom = () => {
+      updatePlayerMarkersZoom(playerMarkersRef.current, map.getZoom());
+    };
+
+    const onSourceData = (e: mapboxgl.MapSourceDataEvent) => {
+      if (e.sourceId === "players" && e.isSourceLoaded) renderPlayers();
+    };
+
+    map.on("moveend", renderPlayers);
+    map.on("zoomend", renderPlayers);
+    map.on("zoom", onZoom);
+    map.on("sourcedata", onSourceData);
+    renderPlayers();
+
+    playerRenderCleanupRef.current = () => {
+      map.off("moveend", renderPlayers);
+      map.off("zoomend", renderPlayers);
+      map.off("zoom", onZoom);
+      map.off("sourcedata", onSourceData);
+      clearPlayerMarkers();
+    };
+
+    return () => playerRenderCleanupRef.current?.();
+  }, [layers.users, ready, city, onOpenGarage]);
+
+  // ── Current user marker (always visible, distinct styling) ───────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+
+    const coords: [number, number] = userCoords
+      ? [userCoords.lng, userCoords.lat]
+      : toLngLat(carPositionRef.current);
+    const props = selfToMarkerProps(
+      profile.handle,
+      profile.rarity,
+      getPlayerLevel(vehicleProgress),
+      getVehicleById(selectedCarId)?.color ?? getVehicleColorForSeed("me"),
+    );
+
+    selfMarkerRef.current = mountPlayerMarker(map, coords, props);
+
+    const onZoom = () => {
+      if (selfMarkerRef.current) {
+        updatePlayerMarkersZoom([selfMarkerRef.current], map.getZoom());
+      }
+    };
+    map.on("zoom", onZoom);
+    map.on("zoomend", onZoom);
+
+    return () => {
+      map.off("zoom", onZoom);
+      map.off("zoomend", onZoom);
+      if (selfMarkerRef.current) {
+        unmountPlayerMarker(selfMarkerRef.current);
+        selfMarkerRef.current = null;
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- position synced in effect below
+  }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const entry = selfMarkerRef.current;
+    if (!map || !ready || !entry) return;
+
+    const coords: [number, number] = userCoords
+      ? [userCoords.lng, userCoords.lat]
+      : toLngLat(carPositionRef.current);
+    entry.marker.setLngLat(coords);
+    updatePlayerMarkerProps(
+      entry,
+      selfToMarkerProps(
+        profile.handle,
+        profile.rarity,
+        getPlayerLevel(vehicleProgress),
+        getVehicleById(selectedCarId)?.color ?? getVehicleColorForSeed("me"),
+      ),
+      map.getZoom(),
+    );
+  }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId, userCoords?.lat, userCoords?.lng]);
+
+  // ── Feature markers (meets) ───────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
 
     featureMarkersRef.current.forEach((m) => m.remove());
     featureMarkersRef.current = [];
-
-    // Other users
-    if (layers.users && (city === "tallinn" || city === "all")) {
-      USERS.forEach((u) => {
-        const popup = new mapboxgl.Popup({ offset: 22 }).setHTML(
-          `<div><b>${u.handle}</b><br/>${u.car.year} ${u.car.make} ${u.car.model}<br/>` +
-          `<i>${u.status === "moving" ? "В движении" : "На споте"}</i><br/>` +
-          `<button data-garage="${u.id}" style="margin-top:6px;background:#FF3B30;color:#fff;border:none;padding:5px 10px;border-radius:6px;font-weight:bold;cursor:pointer">Открыть гараж</button></div>`,
-        );
-        popup.on("open", () => setTimeout(() => {
-          document.querySelector<HTMLButtonElement>(`button[data-garage="${u.id}"]`)
-            ?.addEventListener("click", () => onOpenGarage(u.id));
-        }, 0));
-        const m = new mapboxgl.Marker({
-          element: makeMarkerEl(u.status === "moving" ? "🏎️" : "🅿️", userRole(u.id)),
-        }).setLngLat(toLngLat(u.location)).setPopup(popup).addTo(map);
-        featureMarkersRef.current.push(m);
-      });
-    }
 
     // Meets
     if (layers.meets) {
@@ -1098,15 +1491,17 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         );
         popup.on("open", () => setTimeout(() => {
           document.querySelector<HTMLButtonElement>(`button[data-route="meet-${mt.id}"]`)
-            ?.addEventListener("click", () => triggerRoute(mt.coords, mt.title));
+            ?.addEventListener("click", () => {
+              recordEvent();
+              triggerRoute(mt.coords, mt.title);
+            });
         }, 0));
         const m = new mapboxgl.Marker({ element: makeMarkerEl(mt.cover, "party") })
           .setLngLat(toLngLat(mt.coords)).setPopup(popup).addTo(map);
         featureMarkersRef.current.push(m);
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layers.users, layers.meets, ready, city, visibleMeets.length, onOpenGarage, profile.handle, triggerRoute]);
+  }, [layers.meets, ready, city, visibleMeets.length, triggerRoute, recordEvent]);
 
   // ── Spots: GeoJSON clustering + dynamic HTML markers ─────────────────────────
   useEffect(() => {
@@ -1177,17 +1572,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         const spot = spotsById[id];
         if (!spot) continue;
 
-        const v = SPOT_VISUAL[spot.type];
-        const popup = new mapboxgl.Popup({ offset: 22 }).setHTML(
-          `<b>${spot.name}</b>${spot.userAdded ? " 🆕" : ""}<br/>${spot.description}<br/>★ ${spot.rating} (${spot.reviews})${routeBtnHtml(`spot-${id}`)}`,
-        );
-        popup.on("open", () => setTimeout(() => {
-          document.querySelector<HTMLButtonElement>(`button[data-route="spot-${id}"]`)
-            ?.addEventListener("click", () => triggerRoute(spot.coords, spot.name));
-        }, 0));
-        spotMarkersRef.current[id] = new mapboxgl.Marker({
-          element: makeMarkerEl(spot.photo || v.emoji, SPOT_ROLE[spot.type]),
-        }).setLngLat(coords).setPopup(popup).addTo(map);
+        const el = makeSpotMarkerEl(spot, () => onSpotSelectRef.current(spot));
+        spotMarkersRef.current[id] = new mapboxgl.Marker({ element: el, anchor: "center" })
+          .setLngLat(coords)
+          .addTo(map);
       }
     };
 
@@ -1209,23 +1597,49 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.spots, ready, city, visibleSpots, triggerRoute]);
 
-  // ── Bot markers ───────────────────────────────────────────────────────────────
+  // ── Bot markers (avatar identity markers) ─────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    botMarkersRef.current.forEach((m) => m.remove());
+
+    unmountAllPlayerMarkers(botMarkersRef.current);
     botMarkersRef.current = [];
+
     if (!layers.users || !settings.showBots) return;
+
+    const zoom = map.getZoom();
     bots.forEach((b) => {
       if (b.patrol && !settings.showPatrols) return;
-      const m = new mapboxgl.Marker({ element: makeMarkerEl(b.emoji, b.patrol ? "sos" : "user_regular", 34) })
-        .setLngLat(toLngLat(b.coords))
-        .setPopup(new mapboxgl.Popup({ offset: 20 }).setHTML(
+      const popup = new mapboxgl.Popup({ offset: 24, className: "sg-player-popup-wrap" })
+        .setHTML(
           `<b>${b.name}</b><br/>${b.car}${b.patrol ? '<br/><i style="color:#ff3b30">⚠ Патруль рядом</i>' : ""}`,
-        ))
-        .addTo(map);
-      botMarkersRef.current.push(m);
+        );
+      const entry = mountPlayerMarker(
+        map,
+        toLngLat(b.coords),
+        {
+          avatar: getPlayerAvatarUrl({ id: b.id, handle: b.name }),
+          nickname: `@${b.name.toLowerCase().replace(/\s+/g, "_")}`,
+          level: b.patrol ? 1 : 3,
+          rarity: b.patrol ? "rare" : "common",
+          vehicleColor: getVehicleColorForSeed(b.id),
+          isOnline: true,
+          isCurrentUser: false,
+        },
+        popup,
+      );
+      botMarkersRef.current.push(entry);
     });
+    updatePlayerMarkersZoom(botMarkersRef.current, zoom);
+
+    const onZoom = () => updatePlayerMarkersZoom(botMarkersRef.current, map.getZoom());
+    map.on("zoom", onZoom);
+
+    return () => {
+      map.off("zoom", onZoom);
+      unmountAllPlayerMarkers(botMarkersRef.current);
+      botMarkersRef.current = [];
+    };
   }, [bots, layers.users, settings.showBots, settings.showPatrols, ready]);
 
   // ── SOS markers ───────────────────────────────────────────────────────────────
@@ -1262,10 +1676,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       duration: 1600, essential: true,
     });
     isProgrammaticRef.current = false;
-    setTimeout(() => {
-      const m = spotMarkersRef.current[target.id];
-      if (m && !m.getPopup()?.isOpen()) m.togglePopup();
-    }, 1200);
+    setTimeout(() => setSelectedSpot(target), 1200);
   }, [focusSpot, ready, userSpots]);
 
   // ── External route request ─────────────────────────────────────────────────
@@ -1339,15 +1750,17 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   };
 
   // ── Add spot ──────────────────────────────────────────────────────────────────
-  const handleAddSpot = (data: { type: SpotType; name: string; description: string }) => {
+  const handleAddSpot = (data: { name: string; description: string }) => {
     const center = mapRef.current?.getCenter();
     const coords: [number, number] = center ? [center.lat, center.lng] : cityObj.coords;
-    const v = SPOT_VISUAL[data.type];
     setUserSpots((s) => [...s, {
       id: `us_${Date.now()}`, city: city === "all" ? "tallinn" : city,
-      name: data.name, type: data.type, coords,
-      description: data.description, photo: v.emoji,
-      rating: 0, reviews: 0, userAdded: true,
+      name: data.name, description: data.description, rarity: "common", coords,
+      icon: "📍",
+      reward: { xp: 20, label: "Community Spot" },
+      owner: profile.handle,
+      participants: 1,
+      userAdded: true,
     }]);
     setAddOpen(false);
   };
@@ -1424,54 +1837,29 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           <Layers className="h-4 w-4" />
         </button>
         {/* Buildings toggle */}
-        <button
-          onClick={() => setShowBuildings((v) => !v)}
-          title={showBuildings ? "Скрыть здания" : "Показать здания"}
-          className={`h-9 w-9 grid place-items-center rounded-xl glass-strong transition ${
-            showBuildings ? "text-accent/80" : "text-muted-foreground/40"
-          }`}
-        >
-          <Building2 className="h-4 w-4" />
-        </button>
-
-        {/* GPS nav button — FREE / FOLLOW / DRIVE */}
         <div className="flex flex-col items-center gap-[3px]">
           <button
-            onClick={cycleNavMode}
-            title={
-              navMode === "FREE"
-                ? "Центрировать на машине"
-                : navMode === "FOLLOW"
-                ? "Включить режим движения"
-                : "Отключить слежение"
-            }
+            onClick={() => setShowBuildings((v) => !v)}
+            title={showBuildings ? "Скрыть здания" : "Показать здания"}
             className={`h-9 w-9 grid place-items-center rounded-xl transition
-              ${navMode === "DRIVE"
-                ? "bg-accent shadow-[0_0_14px_rgba(0,240,255,0.55)] text-black"
-                : navMode === "FOLLOW"
-                ? "glass-strong text-accent shadow-[0_0_8px_rgba(0,240,255,0.3)] ring-1 ring-accent/40"
-                : "glass-strong text-muted-foreground/50 hover:text-accent/60"
+              ${showBuildings
+                ? "bg-accent/15 glass-strong text-accent ring-1 ring-accent/30"
+                : "glass-strong text-muted-foreground/40 hover:text-accent/60"
               }`}
           >
-            <Navigation
-              className="h-4 w-4"
-              style={navMode !== "FREE" ? { fill: "currentColor" } : undefined}
-            />
+            <Building className="h-4 w-4" />
           </button>
-          <span
-            className={`text-[7px] font-black tracking-widest leading-none
-              ${navMode === "DRIVE" ? "text-accent" : navMode === "FOLLOW" ? "text-accent/60" : "text-muted-foreground/40"}`}
-          >
-            {navMode}
+          <span className={`text-[7px] font-black tracking-widest leading-none
+            ${showBuildings ? "text-accent/70" : "text-muted-foreground/40"}`}>
+            {showBuildings ? "ON" : "OFF"}
           </span>
         </div>
       </div>
 
-      {/* ── Bottom Waze bar ── */}
-      <div className="absolute bottom-[62px] left-0 right-0 z-[600] flex flex-col gap-2 px-3">
-
-        {/* Row 1 – Plus · Car pill · SOS */}
-        <div className="flex items-end gap-2">
+      {/* ── Bottom action bar ── */}
+      <div className="absolute bottom-[58px] left-0 right-0 z-[600] flex flex-col gap-1.5 px-4 pointer-events-none">
+        {/* Row 1 – Add · Geo · SOS */}
+        <div className="flex items-end justify-between pointer-events-auto">
           <button
             onClick={() => setAddOpen(true)}
             aria-label="Добавить спот"
@@ -1480,43 +1868,27 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             <Plus className="h-5 w-5 text-accent-foreground" />
           </button>
 
-          {/* Car selector pill */}
-          <button
-            onClick={() => setCarSheetOpen(true)}
-            className="flex-1 min-w-0 glass-strong rounded-2xl px-3 py-2 flex items-center gap-2.5 active:opacity-80 transition border border-white/10"
-            style={{ borderColor: `${selectedCar.color}33` }}
-          >
-            <span
-              className="shrink-0 w-3 h-3 rounded-full"
-              style={{ background: selectedCar.color, boxShadow: `0 0 8px ${selectedCar.color}` }}
-            />
-            <span className="text-xl shrink-0 leading-none">{selectedCar.emoji}</span>
-            <div className="min-w-0 flex-1 text-left">
-              <div className="text-[9px] text-muted-foreground leading-none tracking-wider uppercase">
-                3D Model · pitch {WAZE_PITCH}°
-              </div>
-              <div className="text-xs font-bold truncate mt-0.5">{selectedCar.name}</div>
-            </div>
-            <ChevronUp className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          </button>
+          <div className="flex items-end gap-3 sm:gap-4">
+            <NavModeButton mode={navMode} onClick={cycleNavMode} />
 
-          {/* SOS */}
-          <div className="shrink-0 flex flex-col items-center gap-0.5">
-            <button
-              onClick={() => setSosOpen(true)}
-              aria-label="SOS"
-              className="h-12 w-12 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center glow-red animate-pulse-ring active:scale-95 transition shadow-lg"
-            >
-              <Siren className="h-5 w-5 text-white" />
-            </button>
-            <span className="text-[9px] font-black tracking-widest text-primary leading-none">SOS</span>
+            {/* SOS — emergency; label sits below circle; geo aligns to circle baseline */}
+            <div className="shrink-0 flex flex-col items-center gap-0.5">
+              <button
+                onClick={() => setSosOpen(true)}
+                aria-label="SOS"
+                className="sg-sos-btn h-12 w-12 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center active:scale-95"
+              >
+                <Siren className="h-5 w-5 text-white" />
+              </button>
+              <span className="text-[9px] font-bold tracking-widest text-primary/80 leading-none">SOS</span>
+            </div>
           </div>
         </div>
 
         {/* Row 2 – Search */}
         <button
           onClick={() => setSearchOpen(true)}
-          className="w-full glass-strong rounded-full px-4 py-3 flex items-center gap-3 active:opacity-80 transition border border-white/10 shadow-lg"
+          className="w-full glass-strong rounded-full px-4 py-2.5 flex items-center gap-3 active:opacity-80 transition border border-white/10 shadow-lg pointer-events-auto"
         >
           <Search className="h-4 w-4 text-muted-foreground shrink-0" />
           <span className="text-sm text-muted-foreground flex-1 text-left">Куда едем?</span>
@@ -1525,79 +1897,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           </span>
         </button>
       </div>
-
-      {/* ── Garage bottom sheet ── */}
-      {carSheetOpen && (
-        <div className="fixed inset-0 z-[800]" onClick={() => setCarSheetOpen(false)}>
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
-          <div
-            className="absolute bottom-0 left-0 right-0 glass-strong rounded-t-3xl p-5 pb-10 animate-float-up"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="w-10 h-1 bg-white/20 rounded-full mx-auto mb-5" />
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="text-sm font-bold tracking-wider uppercase">Гараж</h3>
-                <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Выбери машину — 3D-модель на карте обновится мгновенно
-                </p>
-              </div>
-              <button
-                onClick={() => setCarSheetOpen(false)}
-                className="h-7 w-7 grid place-items-center rounded-lg glass text-muted-foreground hover:text-foreground transition"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            {GARAGE_CARS.map((car) => {
-              const active = selectedCarId === car.id;
-              return (
-                <button
-                  key={car.id}
-                  onClick={() => { setSelectedCarId(car.id); setCarSheetOpen(false); }}
-                  className={`flex items-center gap-3 w-full p-3.5 rounded-2xl mb-2 transition text-left ${
-                    active ? "border" : "glass border border-white/5 hover:border-white/15"
-                  }`}
-                  style={active ? {
-                    background:  `${car.color}18`,
-                    borderColor: `${car.color}55`,
-                    boxShadow:   `0 0 18px ${car.color}1a`,
-                  } : {}}
-                >
-                  {/* 3D perspective preview */}
-                  <div
-                    className="shrink-0 w-12 h-12 rounded-xl flex items-center justify-center text-2xl"
-                    style={{
-                      background: active ? `${car.color}28` : "rgba(255,255,255,0.05)",
-                      boxShadow:  active ? `0 0 14px ${car.color}55` : "none",
-                      transform:  "perspective(120px) rotateX(30deg)",
-                      border:     `2px solid ${active ? car.color : "rgba(255,255,255,0.08)"}`,
-                    }}
-                  >
-                    {car.emoji}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-bold">{car.name}</div>
-                    <div className="text-[11px] text-muted-foreground mt-0.5">{car.description}</div>
-                    <div className="text-[10px] mt-1" style={{ color: `${car.color}bb` }}>
-                      Three.js 3D · GLTF + процедурный фоллбек
-                    </div>
-                  </div>
-                  {active && (
-                    <span
-                      className="text-[10px] font-black shrink-0 px-2.5 py-1 rounded-full"
-                      style={{ color: car.color, background: `${car.color}22`, border: `1px solid ${car.color}55` }}
-                    >
-                      ✓ В ИГРЕ
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* ── Search bottom sheet ── */}
       {searchOpen && (
@@ -1624,12 +1923,15 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             {visibleSpots.length > 0 && (
               <>
                 <div className="text-[9px] text-muted-foreground tracking-widest uppercase mb-2">Споты рядом</div>
-                {visibleSpots.slice(0, 6).map((spot) => (
+                {visibleSpots.slice(0, 6).map((spot) => {
+                  const visual = getSpotRarityVisual(spot.rarity);
+                  return (
                   <div key={spot.id} className="flex items-center gap-3 glass rounded-2xl px-3 py-2.5 mb-2 border border-white/5">
                     <button
                       className="flex items-center gap-3 flex-1 min-w-0 text-left"
                       onClick={() => {
                         setSearchOpen(false);
+                        setSelectedSpot(spot);
                         setNavMode("FREE");
                         isProgrammaticRef.current = true;
                         mapRef.current?.flyTo({
@@ -1640,10 +1942,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                         isProgrammaticRef.current = false;
                       }}
                     >
-                      <span className="text-xl shrink-0">{SPOT_VISUAL[spot.type].emoji}</span>
+                      <span className="text-xl shrink-0">{spot.icon}</span>
                       <div className="min-w-0 flex-1">
                         <div className="text-xs font-bold truncate">{spot.name}</div>
-                        <div className="text-[10px] text-muted-foreground">★ {spot.rating} · {spot.description.slice(0, 30)}…</div>
+                        <div className="text-[10px] text-muted-foreground">
+                          <span style={{ color: visual.color }}>{visual.label}</span>
+                          {" · "}+{spot.reward.xp} XP
+                        </div>
                       </div>
                     </button>
                     <button
@@ -1651,7 +1956,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       className="shrink-0 text-[10px] bg-accent/20 text-accent border border-accent/30 px-2.5 py-1 rounded-full font-bold hover:bg-accent/30 transition"
                     >GO</button>
                   </div>
-                ))}
+                  );
+                })}
               </>
             )}
 
@@ -1693,6 +1999,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       )}
 
       <SosModal open={sosOpen} fallbackCoords={ME.location} onClose={() => setSosOpen(false)} onSubmit={handleSosSubmit} />
+      <SpotDetailPanel
+        spot={selectedSpot}
+        onClose={() => setSelectedSpot(null)}
+        onRoute={(coords, name) => {
+          if (selectedSpot) recordSpotVisit(selectedSpot.id);
+          setSelectedSpot(null);
+          triggerRoute(coords, name);
+        }}
+      />
+
       <AddSpotModal open={addOpen} onClose={() => setAddOpen(false)} onSubmit={handleAddSpot} />
     </div>
   );
