@@ -7,7 +7,7 @@ type Props = {
   onClick: () => void;
 };
 
-/** Circular GPS nav — icon only; state via data-nav (FREE / FOLLOW / DRIVE). */
+/** Circular GPS nav — sized to align with SOS (48px). */
 export function NavModeButton({ mode, onClick }: Props) {
   const label = NAV_MODE_ARIA[mode];
 
@@ -18,11 +18,10 @@ export function NavModeButton({ mode, onClick }: Props) {
       data-nav={mode}
       aria-label={label}
       title={label}
-      className="sg-nav-btn shrink-0 grid place-items-center rounded-full border-2 backdrop-blur-md active:scale-95
-        h-[58px] w-[58px] sm:h-[60px] sm:w-[60px]"
+      className="sg-nav-btn shrink-0 grid place-items-center rounded-full border-2 backdrop-blur-md active:scale-95 h-12 w-12"
     >
       <Navigation
-        className="sg-nav-icon h-6 w-6 sm:h-[26px] sm:w-[26px]"
+        className="sg-nav-icon h-5 w-5"
         style={mode !== "FREE" ? { fill: "currentColor" } : undefined}
         strokeWidth={mode === "FREE" ? 1.85 : 2.25}
       />

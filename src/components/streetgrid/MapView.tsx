@@ -9,10 +9,15 @@ import {
   type SosSignal, type CityId,
 } from "@/lib/streetgrid/data";
 import { type Spot, getSpotRarityVisual } from "@/lib/streetgrid/spots";
-import { getRankFromProgress } from "@/lib/streetgrid/reputation";
-import { getVehicleLayerOpacity } from "@/lib/streetgrid/avatarVehicleTransition";
+import {
+  getVehicleLayerOpacity,
+  getSharedPlayerPresenceZoomState,
+  PlayerPresenceZoomState,
+  setSharedPlayerPresenceZoomState,
+  PRESENCE_CROSSFADE_END,
+} from "@/lib/streetgrid/avatarVehicleTransition";
 import { useStreetGrid } from "@/lib/streetgrid/store";
-import { VEHICLE_CATALOG, RARITY_META, getPlayerLevel, getRarityRank, rarityFromRank, getVehicleById, getVehicleColorForSeed } from "@/lib/streetgrid/vehicles";
+import { VEHICLE_CATALOG, getPlayerLevel, getRarityRank, rarityFromRank, getVehicleById, getVehicleColorForSeed } from "@/lib/streetgrid/vehicles";
 import type { VehicleDefinition } from "@/lib/streetgrid/vehicles";
 import {
   Layers, Siren, Plus, Clock,
@@ -20,6 +25,7 @@ import {
   Building,
 } from "lucide-react";
 import { NavModeButton } from "./NavModeButton";
+import { PlayerCardSheet } from "./PlayerCardSheet";
 import type { NavMode } from "@/lib/streetgrid/navMode";
 import { SosModal, type SosPayload } from "./SosModal";
 import { AddSpotModal } from "./AddSpotModal";
@@ -29,8 +35,11 @@ import type { PlayerMarkerProps } from "./PlayerMarker";
 import {
   mountPlayerClusterMarker,
   unmountAllPlayerClusterMarkers,
+  unmountPlayerClusterMarker,
   updatePlayerClusterMarker,
   animatePlayerClusterExpand,
+  updatePlayerClusterMarkersZoom,
+  CLUSTER_ZOOM_MS,
   type MountedPlayerCluster,
 } from "./playerClusterMount";
 import {
@@ -39,6 +48,7 @@ import {
   unmountPlayerMarker,
   updatePlayerMarkerProps,
   updatePlayerMarkersZoom,
+  refreshPlayerMarkersOnZoom,
   type MountedPlayerMarker,
 } from "./playerMarkerMount";
 
@@ -89,12 +99,146 @@ const MARKER_THEMES: Record<MarkerRole, { border: string; glow: string; pulse: b
   sos:          { border: "#ff0033", glow: "0 0 8px rgba(255,0,51,0.45),0 0 22px rgba(255,0,51,0.24)", pulse: true  },
 };
 
-/** Individual player markers expand at this zoom and above. */
-const PLAYER_EXPAND_ZOOM = 13;
-/** Mapbox clusters players when zoom <= this value (i.e. zoom < 13). */
-const PLAYER_CLUSTER_MAX_ZOOM = PLAYER_EXPAND_ZOOM - 1;
-/** 10+ players show avatar stack inside cluster badge. */
-const STACK_MIN_COUNT = 10;
+/** Screen-space merge radius — matches 48px cluster footprint. */
+const PLAYER_CLUSTER_RADIUS = 48;
+const CLUSTER_MIN_POINTS = 2;
+
+type ScreenPlayerGroup =
+  | {
+      type: "cluster";
+      key: string;
+      count: number;
+      coords: [number, number];
+      rarity: VehicleRarity;
+      members: UserProfile[];
+    }
+  | { type: "player"; user: UserProfile };
+
+function clusterPreviewAvatars(members: UserProfile[]): string[] {
+  return [...members]
+    .sort((a, b) => getRarityRank(b.rarity) - getRarityRank(a.rarity))
+    .slice(0, 3)
+    .map((u) => getPlayerAvatarUrl(u));
+}
+
+/** Screen-space overlap clustering — merges pins within radius. */
+function clusterPlayersOnScreen(
+  map: mapboxgl.Map,
+  users: UserProfile[],
+  radius = PLAYER_CLUSTER_RADIUS,
+): ScreenPlayerGroup[] {
+  const n = users.length;
+  if (n === 0) return [];
+
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    if (parent[i] !== i) parent[i] = find(parent[i]);
+    return parent[i];
+  };
+  const unite = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+
+  const projected = users.map((u) => map.project(toLngLat(u.location)));
+  const r2 = radius * radius;
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const dx = projected[i].x - projected[j].x;
+      const dy = projected[i].y - projected[j].y;
+      if (dx * dx + dy * dy <= r2) unite(i, j);
+    }
+  }
+
+  const groups = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    const g = groups.get(root) ?? [];
+    g.push(i);
+    groups.set(root, g);
+  }
+
+  const results: ScreenPlayerGroup[] = [];
+  for (const indices of groups.values()) {
+    if (indices.length >= CLUSTER_MIN_POINTS) {
+      let lngSum = 0;
+      let latSum = 0;
+      let maxRank = 0;
+      const ids: string[] = [];
+      for (const idx of indices) {
+        const u = users[idx];
+        ids.push(u.id);
+        const [lng, lat] = toLngLat(u.location);
+        lngSum += lng;
+        latSum += lat;
+        maxRank = Math.max(maxRank, getRarityRank(u.rarity));
+      }
+      const count = indices.length;
+      const members = indices.map((idx) => users[idx]);
+      results.push({
+        type: "cluster",
+        key: `cluster-${[...ids].sort().join("-")}`,
+        count,
+        coords: [lngSum / count, latSum / count],
+        rarity: rarityFromRank(maxRank),
+        members,
+      });
+    } else {
+      results.push({ type: "player", user: users[indices[0]] });
+    }
+  }
+  return results;
+}
+
+const CLUSTER_FIT_PADDING = { top: 88, bottom: 128, left: 64, right: 64 } as const;
+
+/** Fit map to all players in a cluster (lng/lat bounds). */
+function fitMapToClusterMembers(
+  map: mapboxgl.Map,
+  members: UserProfile[],
+  maxZoom: number,
+  duration: number,
+) {
+  if (members.length === 0) return;
+
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+
+  for (const u of members) {
+    const [lng, lat] = toLngLat(u.location);
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+  }
+
+  if (members.length === 1) {
+    map.easeTo({
+      center: [minLng, minLat],
+      zoom: Math.min(map.getZoom() + 1.4, maxZoom),
+      duration,
+      easing: (t) => t * (2 - t),
+    });
+    return;
+  }
+
+  map.fitBounds(
+    [
+      [minLng, minLat],
+      [maxLng, maxLat],
+    ],
+    {
+      padding: CLUSTER_FIT_PADDING,
+      maxZoom,
+      duration,
+      easing: (t) => t * (2 - t),
+    },
+  );
+}
 
 function distKm(a: [number, number], b: [number, number]): number {
   const [lat1, lng1] = a;
@@ -127,12 +271,6 @@ function playersToGeoJson(users: UserProfile[]): GeoJSON.FeatureCollection {
     })),
   };
 }
-
-const STATUS_LABEL: Record<UserProfile["status"], string> = {
-  moving:  "В движении",
-  spot:    "На споте",
-  offline: "Оффлайн",
-};
 
 const routeBtnHtml = (id: string) =>
   `<button data-route="${id}" style="margin-top:6px;background:#00f0ff;color:#001;padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px">🧭 ПОЕХАЛИ</button>`;
@@ -438,7 +576,8 @@ class CarLayer {
   private readonly cars:       VehicleDefinition[];
   private readonly posRef:     { current: [number, number] };
   private readonly headingRef: { current: number };
-  private _lastOpacity = -1; // cached so material traversal only runs when opacity changes
+  private _lastOpacity = -1;
+  private _displayOpacity = 0;
 
   constructor(
     initialCarId: string,
@@ -553,14 +692,17 @@ class CarLayer {
     this.vehicleInnerGlow.scale.set(0.94 + 0.06 * pulse, 0.94 + 0.06 * pulse, 1);
   }
 
-  // Social markers fade 15→16; 3D vehicle takes over above zoom 16.
+  // Avatars fade 13→15; 3D vehicle crossfades in (same band).
   private _getZoomOpacity(zoom: number): number {
     return getVehicleLayerOpacity(zoom);
   }
 
   render(_gl: WebGLRenderingContext, matrix: number[]) {
     const zoom    = this._map.getZoom();
-    const opacity = this._getZoomOpacity(zoom);
+    const target  = this._getZoomOpacity(zoom);
+    const lerp    = 1 - Math.exp(-1 / (300 / (1000 / 60)));
+    this._displayOpacity += (target - this._displayOpacity) * lerp;
+    const opacity = this._displayOpacity;
 
     // Apply opacity to Three.js materials — guarded by delta check so we don't
     // traverse the entire mesh tree every frame when opacity is stable.
@@ -731,31 +873,6 @@ function selfToMarkerProps(
   };
 }
 
-function playerPopupHtml(user: UserProfile): string {
-  const vehicle = `${user.car.year} ${user.car.make} ${user.car.model}`;
-  const rank    = getRankFromProgress(user.reputation);
-  const rarity  = RARITY_META[user.rarity];
-  const avatar  = getPlayerAvatarUrl(user);
-  const onlineClass = user.status === "offline" ? "sg-player-popup__dot--offline" : "sg-player-popup__dot--online";
-  return (
-    `<div class="sg-player-popup">` +
-    `<div class="sg-player-popup__head sg-player-popup__head--avatar">` +
-    `<img class="sg-player-popup__avatar" src="${avatar}" alt="" style="border-color:${rarity.color}88;box-shadow:0 0 12px ${rarity.color}33" />` +
-    `<div>` +
-    `<span class="sg-player-popup__handle">${user.handle}</span>` +
-    `<span class="sg-player-popup__online"><span class="sg-player-popup__dot ${onlineClass}"></span>${STATUS_LABEL[user.status]}</span>` +
-    `</div></div>` +
-    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Редкость</span>` +
-    `<span class="sg-player-popup__value" style="color:${rarity.color}">${rarity.label.toUpperCase()}</span></div>` +
-    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Ранг</span>` +
-    `<span class="sg-player-popup__value sg-player-popup__rank" style="color:${rank.color}">${rank.label.toUpperCase()}</span></div>` +
-    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Уровень</span><span class="sg-player-popup__value sg-player-popup__value--accent">LVL ${user.level}</span></div>` +
-    `<div class="sg-player-popup__row"><span class="sg-player-popup__label">Авто</span><span class="sg-player-popup__value">${vehicle}</span></div>` +
-    `<button data-garage="${user.id}" class="sg-player-popup__btn">Открыть гараж</button>` +
-    `</div>`
-  );
-}
-
 function makeClusterEl(count: number): HTMLDivElement {
   const size = count < 5 ? 44 : count < 20 ? 52 : 60;
   const el   = document.createElement("div");
@@ -809,6 +926,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [layers,        setLayers]        = useState({ users: true, spots: true, meets: true });
   const [bots,          setBots]          = useState<Bot[]>([]);
   const [searchOpen,    setSearchOpen]    = useState(false);
+  const [selectedPlayer, setSelectedPlayer] = useState<UserProfile | null>(null);
+  const [playerToast,    setPlayerToast]    = useState<string | null>(null);
   // GPS permission / availability status used to drive the overlay.
   // 'loading'  — waiting for first position or permission answer
   // 'granted'  — at least one position received (or user skipped)
@@ -825,6 +944,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // Set to true around programmatic easeTo/flyTo so gesture listeners don't
   // accidentally flip navMode to FREE during our own animations.
   const isProgrammaticRef = useRef(false);
+  const onOpenGarageRef = useRef(onOpenGarage);
+  onOpenGarageRef.current = onOpenGarage;
+  const onPlayerTapRef = useRef<(user: UserProfile) => void>(() => {});
+  onPlayerTapRef.current = (user) => {
+    setSelectedPlayer(user);
+    setNavMode("FREE");
+  };
 
   // Navigation mode — single source of truth for all GPS camera behavior.
   // FREE   — GPS updates BMW position; camera stays where the user left it
@@ -960,12 +1086,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       map.addSource("players", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
-        cluster: true,
-        clusterMaxZoom: PLAYER_CLUSTER_MAX_ZOOM,
-        clusterRadius: 52,
-        clusterProperties: {
-          max_rarity_rank: ["max", ["get", "rarity_rank"]],
-        },
+        // Custom React clusters only — no Mapbox cluster layers.
+        cluster: false,
       });
 
       // ── 3D car layer (Three.js custom layer) ───────────────────────────────
@@ -1271,20 +1393,33 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const clearRoute   = useCallback(() => { setRouteGeoJson(null); setActiveRoute(null); }, [setRouteGeoJson]);
   const triggerRoute = useCallback((c: [number, number], n: string) => runRouteTo(c, n), [runRouteTo]);
 
-  // ── Live players: cluster below zoom 13, individuals at zoom >= 13 ───────────
+  const showPlayerToast = useCallback((msg: string) => {
+    setPlayerToast(msg);
+    window.setTimeout(() => setPlayerToast(null), 2400);
+  }, []);
+
+  const myLocation = userCoords
+    ? ([userCoords.lat, userCoords.lng] as [number, number])
+    : carPositionRef.current;
+
+  const selectedPlayerDistance = selectedPlayer
+    ? distKm(myLocation, selectedPlayer.location)
+    : null;
+
+  // ── Live players: mount once, opacity on zoom, sync clusters on pan ───────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
 
-    playerRenderCleanupRef.current?.();
-    playerRenderCleanupRef.current = null;
-
     const source = map.getSource("players") as mapboxgl.GeoJSONSource | undefined;
     if (!source) return;
 
+    playerRenderCleanupRef.current?.();
+    playerRenderCleanupRef.current = null;
+
     const onlineUsers = getOnlinePlayersForMap(city);
-    const usersById: Record<string, UserProfile> = {};
-    onlineUsers.forEach((u) => { usersById[u.id] = u; });
+    const presenceZoom = new PlayerPresenceZoomState();
+    setSharedPlayerPresenceZoomState(presenceZoom);
 
     source.setData(
       layers.users ? playersToGeoJson(onlineUsers) : { type: "FeatureCollection", features: [] },
@@ -1297,126 +1432,174 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       playerClusterMarkersRef.current = {};
     };
 
-    const fitClusterBounds = (clusterId: number, entry: MountedPlayerCluster) => {
-      const zoomToCluster = () => {
-        source.getClusterLeaves(clusterId, 100, 0, (err, leaves) => {
-          if (err || !leaves?.length) return;
-          const bounds = new mapboxgl.LngLatBounds();
-          for (const leaf of leaves) {
-            bounds.extend((leaf.geometry as GeoJSON.Point).coordinates as [number, number]);
-          }
-          setNavMode("FREE");
-          isProgrammaticRef.current = true;
-          map.fitBounds(bounds, {
-            padding: 80,
-            maxZoom: PLAYER_EXPAND_ZOOM,
-            duration: 720,
-            easing: (t) => t * (2 - t),
-          });
-          window.setTimeout(() => {
-            isProgrammaticRef.current = false;
-          }, 750);
-        });
-      };
-      animatePlayerClusterExpand(entry, zoomToCluster);
+    if (!layers.users || (city !== "tallinn" && city !== "all")) {
+      clearPlayerMarkers();
+      return;
+    }
+
+    const zoomCluster = (
+      members: UserProfile[],
+      entry: MountedPlayerCluster,
+    ) => {
+      animatePlayerClusterExpand(entry, () => {
+        setNavMode("FREE");
+        isProgrammaticRef.current = true;
+        fitMapToClusterMembers(
+          map,
+          members,
+          PRESENCE_CROSSFADE_END - 0.01,
+          CLUSTER_ZOOM_MS,
+        );
+        window.setTimeout(() => {
+          isProgrammaticRef.current = false;
+        }, CLUSTER_ZOOM_MS + 50);
+      });
     };
 
-    const renderPlayers = () => {
-      if (!map.isStyleLoaded()) return;
-      clearPlayerMarkers();
-      if (!layers.users || (city !== "tallinn" && city !== "all")) return;
-
+    const syncPlayerPresence = () => {
       const zoom = map.getZoom();
-      const clusterMode = zoom < PLAYER_EXPAND_ZOOM;
-      const features = map.querySourceFeatures("players");
-      const seen = new Set<string>();
+      const opacities = presenceZoom.update(zoom);
+      const radius = presenceZoom.getClusterRadius();
+      const groups = clusterPlayersOnScreen(map, onlineUsers, radius);
 
-      for (const feature of features) {
-        const props = feature.properties;
-        if (!props) continue;
-        const coords = (feature.geometry as GeoJSON.Point).coordinates as [number, number];
+      const visibleAvatars: UserProfile[] = [];
+      const nextClusterKeys = new Set<string>();
 
-        if (clusterMode && props.point_count != null) {
-          const clusterId = props.cluster_id as number;
-          const key = `cluster-${clusterId}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
+      for (const group of groups) {
+        if (group.type === "cluster") {
+          nextClusterKeys.add(group.key);
+        } else {
+          visibleAvatars.push(group.user);
+        }
+      }
 
-          const count = Number(props.point_count);
-          const rarity = rarityFromRank(Number(props.max_rarity_rank ?? 0));
-          const entry = mountPlayerClusterMarker(
-            map,
-            coords,
-            { count, rarity, avatarUrls: [] },
-            () => fitClusterBounds(clusterId, entry),
-          );
-          playerClusterMarkersRef.current[key] = entry;
+      for (const group of groups) {
+        if (group.type !== "cluster") continue;
 
-          if (count >= STACK_MIN_COUNT) {
-            source.getClusterLeaves(clusterId, 3, 0, (err, leaves) => {
-              if (err || !leaves) return;
-              const avatarUrls = leaves
-                .map((leaf) => {
-                  const id = String(leaf.properties?.id ?? "");
-                  const user = usersById[id];
-                  return user ? getPlayerAvatarUrl(user) : "";
-                })
-                .filter(Boolean);
-              updatePlayerClusterMarker(entry, { count, rarity, avatarUrls });
-            });
-          }
+        const clusterProps = {
+          count: group.count,
+          rarity: group.rarity,
+          previewAvatars: clusterPreviewAvatars(group.members),
+        };
+        const existing = playerClusterMarkersRef.current[group.key];
+        if (existing) {
+          updatePlayerClusterMarker(existing, clusterProps, group.coords);
           continue;
         }
 
-        const id = String(props.id);
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        const user = usersById[id];
-        if (!user) continue;
+        const entry = mountPlayerClusterMarker(
+          map,
+          group.key,
+          group.coords,
+          clusterProps,
+          () => zoomCluster(group.members, entry),
+          opacities,
+        );
+        playerClusterMarkersRef.current[group.key] = entry;
+      }
 
-        if (clusterMode) {
-          const entry = mountPlayerMarker(map, coords, userToMarkerProps(user));
-          playerMarkersRef.current.push(entry);
+      for (const [key, entry] of Object.entries(playerClusterMarkersRef.current)) {
+        if (!nextClusterKeys.has(key)) {
+          unmountPlayerClusterMarker(entry);
+          delete playerClusterMarkersRef.current[key];
+        }
+      }
+
+      updatePlayerClusterMarkersZoom(playerClusterMarkersRef.current, opacities);
+
+      const byUserId = new Map(
+        playerMarkersRef.current
+          .filter((e) => e.userId)
+          .map((e) => [e.userId!, e] as const),
+      );
+
+      for (const user of visibleAvatars) {
+        const coords = toLngLat(user.location);
+        const existing = byUserId.get(user.id);
+        if (existing) {
+          existing.marker.setLngLat(coords);
+          updatePlayerMarkerProps(existing, userToMarkerProps(user), zoom, opacities);
+          byUserId.delete(user.id);
           continue;
         }
-
-        const popup = new mapboxgl.Popup({ offset: 28, className: "sg-player-popup-wrap" })
-          .setHTML(playerPopupHtml(user));
-        popup.on("open", () => setTimeout(() => {
-          document.querySelector<HTMLButtonElement>(`button[data-garage="${user.id}"]`)
-            ?.addEventListener("click", () => onOpenGarage(user.id));
-        }, 0));
-        const entry = mountPlayerMarker(map, coords, userToMarkerProps(user), popup);
+        const entry = mountPlayerMarker(
+          map,
+          coords,
+          userToMarkerProps(user),
+          { userId: user.id, onTap: () => onPlayerTapRef.current(user) },
+          opacities,
+        );
         playerMarkersRef.current.push(entry);
       }
 
-      updatePlayerMarkersZoom(playerMarkersRef.current, zoom);
+      for (const stale of byUserId.values()) {
+        unmountPlayerMarker(stale);
+        playerMarkersRef.current = playerMarkersRef.current.filter((e) => e !== stale);
+      }
+
+      refreshPlayerMarkersOnZoom(playerMarkersRef.current, zoom, opacities);
+      return opacities;
     };
+
+    const applyZoomOpacities = () => {
+      const zoom = map.getZoom();
+      const opacities = presenceZoom.update(zoom);
+      refreshPlayerMarkersOnZoom(playerMarkersRef.current, zoom, opacities);
+      updatePlayerClusterMarkersZoom(playerClusterMarkersRef.current, opacities);
+      return opacities;
+    };
+
+    let lastPanCenter = map.getCenter();
+    let lastClusterRadius = presenceZoom.getClusterRadius();
 
     const onZoom = () => {
-      updatePlayerMarkersZoom(playerMarkersRef.current, map.getZoom());
+      applyZoomOpacities();
     };
 
-    const onSourceData = (e: mapboxgl.MapSourceDataEvent) => {
-      if (e.sourceId === "players" && e.isSourceLoaded) renderPlayers();
+    const onZoomEnd = () => {
+      const radius = presenceZoom.getClusterRadius();
+      if (radius !== lastClusterRadius) lastClusterRadius = radius;
+      syncPlayerPresence();
     };
 
-    map.on("moveend", renderPlayers);
-    map.on("zoomend", renderPlayers);
+    const onMoveEnd = () => {
+      const center = map.getCenter();
+      const panChanged =
+        Math.abs(center.lng - lastPanCenter.lng) > 1e-5 ||
+        Math.abs(center.lat - lastPanCenter.lat) > 1e-5;
+      if (panChanged) {
+        lastPanCenter = center;
+        if (presenceZoom.shouldSyncClustersOnPan(map.getZoom())) {
+          syncPlayerPresence();
+          return;
+        }
+      }
+      applyZoomOpacities();
+    };
+
+    if (import.meta.env.DEV) {
+      console.info(
+        "[STREETGRID] Custom player clusters: screen-space overlap, 48px, " +
+          "count (2–9) / stack+count (10+), tap → fitBounds 250ms. No Mapbox cluster layers.",
+      );
+    }
+
+    syncPlayerPresence();
+    lastClusterRadius = presenceZoom.getClusterRadius();
+
+    map.on("moveend", onMoveEnd);
     map.on("zoom", onZoom);
-    map.on("sourcedata", onSourceData);
-    renderPlayers();
+    map.on("zoomend", onZoomEnd);
 
     playerRenderCleanupRef.current = () => {
-      map.off("moveend", renderPlayers);
-      map.off("zoomend", renderPlayers);
+      map.off("moveend", onMoveEnd);
       map.off("zoom", onZoom);
-      map.off("sourcedata", onSourceData);
+      map.off("zoomend", onZoomEnd);
       clearPlayerMarkers();
     };
 
     return () => playerRenderCleanupRef.current?.();
-  }, [layers.users, ready, city, onOpenGarage]);
+  }, [layers.users, ready, city]);
 
   // ── Current user marker (always visible, distinct styling) ───────────────────
   useEffect(() => {
@@ -1436,16 +1619,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     selfMarkerRef.current = mountPlayerMarker(map, coords, props);
 
     const onZoom = () => {
-      if (selfMarkerRef.current) {
-        updatePlayerMarkersZoom([selfMarkerRef.current], map.getZoom());
-      }
+      if (!selfMarkerRef.current) return;
+      const zoom = map.getZoom();
+      const opacities = getSharedPlayerPresenceZoomState().update(zoom);
+      refreshPlayerMarkersOnZoom([selfMarkerRef.current], zoom, opacities);
     };
     map.on("zoom", onZoom);
-    map.on("zoomend", onZoom);
+    onZoom();
 
     return () => {
       map.off("zoom", onZoom);
-      map.off("zoomend", onZoom);
       if (selfMarkerRef.current) {
         unmountPlayerMarker(selfMarkerRef.current);
         selfMarkerRef.current = null;
@@ -1463,6 +1646,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       ? [userCoords.lng, userCoords.lat]
       : toLngLat(carPositionRef.current);
     entry.marker.setLngLat(coords);
+    const zoom = map.getZoom();
+    const opacities = getSharedPlayerPresenceZoomState().update(zoom);
     updatePlayerMarkerProps(
       entry,
       selfToMarkerProps(
@@ -1471,7 +1656,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         getPlayerLevel(vehicleProgress),
         getVehicleById(selectedCarId)?.color ?? getVehicleColorForSeed("me"),
       ),
-      map.getZoom(),
+      zoom,
+      opacities,
     );
   }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId, userCoords?.lat, userCoords?.lng]);
 
@@ -1626,13 +1812,21 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           isOnline: true,
           isCurrentUser: false,
         },
-        popup,
+        { popup },
       );
       botMarkersRef.current.push(entry);
     });
-    updatePlayerMarkersZoom(botMarkersRef.current, zoom);
+    updatePlayerMarkersZoom(
+      botMarkersRef.current,
+      zoom,
+      getSharedPlayerPresenceZoomState().update(zoom),
+    );
 
-    const onZoom = () => updatePlayerMarkersZoom(botMarkersRef.current, map.getZoom());
+    const onZoom = () => {
+      const z = map.getZoom();
+      const opacities = getSharedPlayerPresenceZoomState().update(z);
+      refreshPlayerMarkersOnZoom(botMarkersRef.current, z, opacities);
+    };
     map.on("zoom", onZoom);
 
     return () => {
@@ -1868,19 +2062,19 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             <Plus className="h-5 w-5 text-accent-foreground" />
           </button>
 
-          <div className="flex items-end gap-3 sm:gap-4">
+          <div className="sg-map-controls flex items-end gap-3">
             <NavModeButton mode={navMode} onClick={cycleNavMode} />
 
-            {/* SOS — emergency; label sits below circle; geo aligns to circle baseline */}
             <div className="shrink-0 flex flex-col items-center gap-0.5">
               <button
                 onClick={() => setSosOpen(true)}
                 aria-label="SOS"
-                className="sg-sos-btn h-12 w-12 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center active:scale-95"
+                aria-pressed={sosOpen}
+                className={`sg-sos-btn h-12 w-12 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center active:scale-95${sosOpen ? " sg-sos-btn--active" : ""}`}
               >
                 <Siren className="h-5 w-5 text-white" />
               </button>
-              <span className="text-[9px] font-bold tracking-widest text-primary/80 leading-none">SOS</span>
+              <span className="text-[9px] font-bold tracking-widest text-primary/70 leading-none">SOS</span>
             </div>
           </div>
         </div>
@@ -2008,6 +2202,45 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           triggerRoute(coords, name);
         }}
       />
+
+      <PlayerCardSheet
+        user={selectedPlayer}
+        distanceKm={selectedPlayerDistance}
+        onClose={() => setSelectedPlayer(null)}
+        onViewProfile={(userId) => {
+          setSelectedPlayer(null);
+          onOpenGarage(userId);
+        }}
+        onInvite={(user) => {
+          pushChat({
+            city: "tallinn",
+            user: "SYSTEM",
+            text: `Meetup invite sent to ${user.handle}`,
+            time: "now",
+          });
+          showPlayerToast(`Meetup invite sent to ${user.handle}`);
+        }}
+        onRoute={(coords, name) => {
+          setSelectedPlayer(null);
+          triggerRoute(coords, name);
+        }}
+        onAddFriend={(user) => {
+          pushChat({
+            city: "tallinn",
+            user: "SYSTEM",
+            text: `${user.handle} added to friends`,
+            time: "now",
+          });
+          showPlayerToast(`${user.handle} added to friends`);
+          recordEvent();
+        }}
+      />
+
+      {playerToast && (
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[900] px-4 py-2.5 rounded-full glass-strong border border-white/10 text-xs font-bold shadow-lg pointer-events-none animate-float-up">
+          {playerToast}
+        </div>
+      )}
 
       <AddSpotModal open={addOpen} onClose={() => setAddOpen(false)} onSubmit={handleAddSpot} />
     </div>

@@ -1,17 +1,13 @@
 import type { CSSProperties } from "react";
 import { Car } from "lucide-react";
 import { cn } from "@/lib/utils";
-import {
-  PRESENCE_CROSSFADE_END,
-  PLAYER_DETAILED_MIN_ZOOM,
-} from "@/lib/streetgrid/avatarVehicleTransition";
+import { ZOOM_AVATAR_MIN } from "@/lib/streetgrid/avatarVehicleTransition";
 import {
   getMarkerRarityStyles,
-  RARITY_META,
   type VehicleRarity,
 } from "@/lib/streetgrid/vehicles";
 
-export type PlayerMarkerZoomBand = "far" | "medium" | "hidden";
+export type PlayerMarkerZoomBand = "far" | "medium" | "near" | "hidden";
 
 export type PlayerMarkerProps = {
   avatar: string;
@@ -24,15 +20,16 @@ export type PlayerMarkerProps = {
   zoomBand?: PlayerMarkerZoomBand;
   /** 0–1 opacity for 2D vehicle icon (social mid-band). */
   vehicleIconOpacity?: number;
+  /** Level badge — visible zoom 12–15. */
+  showLevel?: boolean;
 };
 
 export function getPlayerMarkerZoom(zoom: number): PlayerMarkerZoomBand {
-  if (zoom >= PRESENCE_CROSSFADE_END) return "hidden";
-  if (zoom >= PLAYER_DETAILED_MIN_ZOOM) return "medium";
+  if (zoom >= ZOOM_AVATAR_MIN) return "medium";
   return "far";
 }
 
-/** Circular identity marker — avatar, rarity ring, optional 2D vehicle icon. */
+/** Premium pin marker — avatar, rarity ring, tail, level, online. */
 export function PlayerMarker({
   avatar,
   nickname,
@@ -43,50 +40,67 @@ export function PlayerMarker({
   isCurrentUser = false,
   zoomBand = "far",
   vehicleIconOpacity = 0,
+  showLevel = true,
 }: PlayerMarkerProps) {
   if (zoomBand === "hidden") return null;
 
-  const medium = zoomBand === "medium";
-  const label = nickname.startsWith("@") ? nickname : `@${nickname}`;
-  const meta = RARITY_META[rarity];
-  const rarityStyle = getMarkerRarityStyles(rarity) as CSSProperties;
-  const showLevel = medium;
-  const showSelfNickname = isCurrentUser && medium;
+  const rarityStyle = (
+    isCurrentUser ? undefined : getMarkerRarityStyles(rarity)
+  ) as CSSProperties | undefined;
   const showVehicleIcon = vehicleIconOpacity > 0.02;
 
   return (
     <div
       className={cn(
         "sg-player-marker",
-        `sg-player-marker--${rarity}`,
-        `sg-player-marker--${zoomBand}`,
+        !isCurrentUser && `sg-player-marker--${rarity}`,
         isCurrentUser && "sg-player-marker--self",
         showVehicleIcon && "sg-player-marker--with-vehicle",
       )}
       style={rarityStyle}
     >
       <div className="sg-player-marker__body">
-        <span className="sg-player-marker__glow" aria-hidden />
-        {isCurrentUser && <span className="sg-player-marker__gold-ring" aria-hidden />}
-        <div className="sg-player-marker__photo-wrap">
-          <img
-            src={avatar}
-            alt=""
-            className="sg-player-marker__photo"
-            draggable={false}
-          />
-          {isOnline && (
-            <span className="sg-player-marker__online" title="Online" />
-          )}
-          {showLevel && (
-            <span
-              className="sg-player-marker__level"
-              style={{ color: meta.color, borderColor: `${meta.color}88` }}
-            >
-              {level}
+        <div className="sg-player-marker__pin">
+          {isCurrentUser && (
+            <span className="sg-player-marker__you" aria-label="You">
+              YOU
             </span>
           )}
+          <span className="sg-player-marker__glow" aria-hidden />
+          {isCurrentUser && (
+            <span className="sg-player-marker__gold-ring" aria-hidden />
+          )}
+          <div className="sg-player-marker__photo-wrap">
+            <img
+              src={avatar}
+              alt=""
+              className="sg-player-marker__photo"
+              draggable={false}
+              width={92}
+              height={92}
+            />
+            {isOnline && (
+              <span className="sg-player-marker__online" title="Online" />
+            )}
+            {showLevel && (
+              <span
+                className={cn(
+                  "sg-player-marker__level",
+                  level >= 10 && "sg-player-marker__level--wide",
+                  isCurrentUser && "sg-player-marker__level--self",
+                )}
+                title={`Level ${level}`}
+                aria-label={`Level ${level}`}
+              >
+                {level}
+              </span>
+            )}
+          </div>
+          <span className="sg-player-marker__tail" aria-hidden>
+            <span className="sg-player-marker__tail-tip" />
+          </span>
         </div>
+
         {showVehicleIcon && (
           <span
             className="sg-player-marker__vehicle"
@@ -94,7 +108,7 @@ export function PlayerMarker({
               opacity: vehicleIconOpacity,
               color: vehicleColor,
               borderColor: `${vehicleColor}88`,
-              boxShadow: `0 0 10px ${vehicleColor}44`,
+              boxShadow: `0 0 6px ${vehicleColor}33`,
             }}
             aria-hidden
           >
@@ -102,10 +116,6 @@ export function PlayerMarker({
           </span>
         )}
       </div>
-
-      {showSelfNickname && (
-        <span className="sg-player-marker__nickname">{label}</span>
-      )}
     </div>
   );
 }

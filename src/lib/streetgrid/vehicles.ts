@@ -59,11 +59,11 @@ export const RARITY_META: Record<
   VehicleRarity,
   { label: string; color: string; border: string; glow: string }
 > = {
-  common:    { label: "Common",    color: "#A0A0A0", border: "#A0A0A044", glow: "0 0 12px rgba(160,160,160,0.28)" },
-  rare:      { label: "Rare",      color: "#00D8FF", border: "#00D8FF55", glow: "0 0 14px rgba(0,216,255,0.35)" },
-  epic:      { label: "Epic",      color: "#B347FF", border: "#B347FF55", glow: "0 0 16px rgba(179,71,255,0.4)" },
-  legendary: { label: "Legendary", color: "#FF9A00", border: "#FF9A0055", glow: "0 0 18px rgba(255,154,0,0.45)" },
-  mythic:    { label: "Mythic",    color: "#FF355E", border: "#FF355E66", glow: "0 0 22px rgba(255,53,94,0.55)" },
+  common:    { label: "Common",    color: "#9CA3AF", border: "#9CA3AF55", glow: "0 0 12px rgba(156,163,175,0.32)" },
+  rare:      { label: "Rare",      color: "#22D3EE", border: "#22D3EE55", glow: "0 0 14px rgba(34,211,238,0.38)" },
+  epic:      { label: "Epic",      color: "#A855F7", border: "#A855F755", glow: "0 0 16px rgba(168,85,247,0.42)" },
+  legendary: { label: "Legendary", color: "#F59E0B", border: "#F59E0B55", glow: "0 0 18px rgba(245,158,11,0.45)" },
+  mythic:    { label: "Mythic",    color: "#FF2D55", border: "#FF2D5566", glow: "0 0 22px rgba(255,45,85,0.52)" },
 };
 
 export function getRarityRank(rarity: VehicleRarity): number {
@@ -75,14 +75,14 @@ export function rarityFromRank(rank: number): VehicleRarity {
   return RARITY_ORDER[idx] ?? "common";
 }
 
-/** Subtle map-marker tints — same palette as garage, toned down for P1 readability. */
+/** Premium map-marker tokens — rarity ring, glow, pin tail (compact footprint). */
 export function getMarkerRarityStyles(rarity: VehicleRarity): Record<string, string> {
   const { color } = RARITY_META[rarity];
   return {
     "--rarity-color":       color,
-    "--rarity-glow":        `${color}2b`,
-    "--rarity-shadow-soft": `0 0 9px ${color}40, 0 0 18px ${color}18`,
-    "--rarity-tail-glow":   `${color}28`,
+    "--rarity-glow":        `${color}18`,
+    "--rarity-shadow-soft": `0 0 4px ${color}28, 0 0 10px ${color}0c`,
+    "--rarity-tail-glow":   `0 1px 4px ${color}32`,
   };
 }
 

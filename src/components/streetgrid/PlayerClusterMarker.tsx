@@ -8,22 +8,25 @@ import {
 export type PlayerClusterMarkerProps = {
   count: number;
   rarity: VehicleRarity;
-  avatarUrls: string[];
+  /** Up to 3 avatar URLs — shown when count ≥ 10. */
+  previewAvatars?: string[];
   expanding?: boolean;
 };
 
-/** 10+ players → avatar stack + count badge; 2–9 → count badge only. */
-export const STACK_MIN_COUNT = 10;
+function clusterVariant(count: number): "count" | "stack" {
+  return count >= 10 ? "stack" : "count";
+}
 
+/** Premium STREETGRID cluster — count (2–9) or count + avatar stack (10+). */
 export function PlayerClusterMarker({
   count,
   rarity,
-  avatarUrls,
+  previewAvatars = [],
   expanding = false,
 }: PlayerClusterMarkerProps) {
   const rarityStyle = getMarkerRarityStyles(rarity) as CSSProperties;
-  const showStack = count >= STACK_MIN_COUNT && avatarUrls.length > 0;
-  const stack = avatarUrls.slice(0, 3);
+  const variant = clusterVariant(count);
+  const avatars = previewAvatars.slice(0, 3);
 
   return (
     <button
@@ -31,34 +34,37 @@ export function PlayerClusterMarker({
       className={cn(
         "sg-player-cluster",
         `sg-player-cluster--${rarity}`,
-        showStack && "sg-player-cluster--stacked",
+        `sg-player-cluster--${variant}`,
         expanding && "sg-player-cluster--expand",
       )}
       style={rarityStyle}
-      aria-label={`${count} players`}
+      aria-label={`${count} players nearby`}
     >
       <span className="sg-player-cluster__glow" aria-hidden />
-      <span className="sg-player-cluster__ring">
-        {showStack ? (
-          <span className="sg-player-cluster__stack">
-            {stack.map((url, i) => (
+
+      {variant === "count" ? (
+        <span className="sg-player-cluster__disc">
+          <span className="sg-player-cluster__count">{count}</span>
+        </span>
+      ) : (
+        <span className="sg-player-cluster__stack">
+          <span className="sg-player-cluster__avatars" aria-hidden>
+            {avatars.map((src, i) => (
               <img
-                key={`${url}-${i}`}
-                src={url}
+                key={`${src}-${i}`}
+                src={src}
                 alt=""
                 className="sg-player-cluster__avatar"
-                style={{ zIndex: stack.length - i }}
                 draggable={false}
+                width={56}
+                height={56}
+                style={{ zIndex: avatars.length - i }}
               />
             ))}
           </span>
-        ) : (
-          <span className="sg-player-cluster__badge">{count}</span>
-        )}
-        {showStack && (
           <span className="sg-player-cluster__count">{count}</span>
-        )}
-      </span>
+        </span>
+      )}
     </button>
   );
 }
