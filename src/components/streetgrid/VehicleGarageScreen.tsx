@@ -9,6 +9,7 @@ import {
   type VehicleDefinition,
   type OwnedVehicle,
 } from "@/lib/streetgrid/vehicles";
+import { getRarityBoxShadow, getRarityUiBorder } from "@/lib/streetgrid/markerRendering";
 
 export function VehicleGarageScreen() {
   const { vehicleProgress, selectedCarId, equipVehicle, getOwnedVehicle } = useStreetGrid();
@@ -90,7 +91,7 @@ function EquippedHero({ vehicle, owned }: { vehicle: VehicleDefinition; owned?: 
       <div className="absolute bottom-4 left-4 right-4">
         <span
           className="text-[9px] font-black tracking-widest px-2 py-0.5 rounded-full border"
-          style={{ color: rarity.color, borderColor: rarity.border, background: `${rarity.color}18` }}
+          style={{ color: rarity.color, borderColor: getRarityUiBorder(vehicle.rarity), background: `${rarity.color}18` }}
         >
           {rarity.label.toUpperCase()}
         </span>
@@ -137,7 +138,7 @@ function VehicleCard({
       <button onClick={onSelect} className="flex items-center gap-3 flex-1 min-w-0 text-left">
         <div
           className="shrink-0 w-12 h-12 rounded-xl grid place-items-center text-2xl border"
-          style={{ borderColor: rarity.border, background: `${def.color}15`, boxShadow: rarity.glow }}
+          style={{ borderColor: getRarityUiBorder(def.rarity), background: `${def.color}15`, boxShadow: getRarityBoxShadow(def.rarity) }}
         >
           {def.emoji}
         </div>
@@ -220,7 +221,7 @@ function VehicleDetailSheet({
           <div>
             <span
               className="text-[9px] font-black tracking-widest px-2 py-0.5 rounded-full border"
-              style={{ color: rarity.color, borderColor: rarity.border, background: `${rarity.color}18` }}
+              style={{ color: rarity.color, borderColor: getRarityUiBorder(vehicle.rarity), background: `${rarity.color}18` }}
             >
               {rarity.label.toUpperCase()}
             </span>

@@ -1,44 +1,62 @@
 /** Multi-zoom presence — clusters ↔ avatars ↔ 3D vehicles. */
 
-/** Below ~12: clusters dominate. Avatars ramp in 11.75→12.25. */
 export const ZOOM_CLUSTER_ONLY_MAX = 12;
-export const ZOOM_AVATAR_MIN = 12;
+export const CLUSTER_EXPAND_START = 13;
+export const CLUSTER_EXPAND_END = 15;
 
-/** Full avatar band ends where 3D handoff begins. */
+export const ZOOM_AVATAR_MIN = 12;
 export const ZOOM_AVATAR_SOCIAL_FULL = 13;
 export const ZOOM_AVATAR_MAX = 15;
 
-/** Crossfade clusters → avatars (~300ms pinch around zoom 12). */
-export const ZOOM_CLUSTER_AVATAR_FADE_START = 11.75;
-export const ZOOM_CLUSTER_AVATAR_FADE_END = 12.25;
+/** Hysteresis — cluster mode vs player mode (prevents flicker during pinch). */
+export const HYST_CLUSTER_MODE_MAX = 12.5;
+export const HYST_AVATAR_MODE_MIN = 14.5;
 
-/** Crossfade avatars → 3D cars — zoom 13→15 (opacity overlap, no hysteresis). */
+/** Crossfade avatars → 3D cars (unchanged band). */
 export const AVATAR_3D_FADE_START = 13;
 export const AVATAR_3D_FADE_END = 15;
 
-/** Legacy aliases — same band as avatar ↔ 3D crossfade. */
 export const PRESENCE_CROSSFADE_START = AVATAR_3D_FADE_START;
 export const PRESENCE_CROSSFADE_END = AVATAR_3D_FADE_END;
 
-/** Cluster merge radius hysteresis (mount stability only — not opacity). */
-export const HYST_CLUSTER_AVATAR_SHOW_MIN = 12.15;
-export const HYST_CLUSTER_AVATAR_HIDE_MAX = 11.85;
+/** Screen-space merge radius — wide when clustered, tight when expanded. */
+export const CLUSTER_MERGE_RADIUS_WIDE = 52;
+export const CLUSTER_MERGE_RADIUS_TIGHT = 26;
 
-/** CSS / marker transition target (250–350ms). */
+/** Cluster ↔ individual crossfade band (zoom 13 → 15). */
+export const CLUSTER_EXPAND_FADE_START = CLUSTER_EXPAND_START;
+export const CLUSTER_EXPAND_FADE_END = CLUSTER_EXPAND_END;
+
+/** Opacity + scale transition (~300ms rAF lerp, spring-like handoff). */
 export const PRESENCE_TRANSITION_MS = 300;
 
+/** Cluster visual expand band — zoom 13 → 14 (before full individual at ≥15). */
+export const CLUSTER_VISUAL_EXPAND_START = 13;
+export const CLUSTER_VISUAL_EXPAND_END = 14;
+
+/** Scale at opacity 0 / 1 during cluster ↔ player handoff. */
+export const PRESENCE_SCALE_MIN = 0.85;
+export const PRESENCE_SCALE_MAX = 1;
+
 /** Legacy aliases */
+export const ZOOM_CLUSTER_AVATAR_FADE_START = HYST_CLUSTER_MODE_MAX;
+export const ZOOM_CLUSTER_AVATAR_FADE_END = HYST_AVATAR_MODE_MIN;
+export const HYST_CLUSTER_AVATAR_SHOW_MIN = HYST_AVATAR_MODE_MIN;
+export const HYST_CLUSTER_AVATAR_HIDE_MAX = HYST_CLUSTER_MODE_MAX;
 export const PLAYER_FAR_MAX_ZOOM = ZOOM_CLUSTER_ONLY_MAX - 0.001;
-export const PLAYER_DETAILED_MIN_ZOOM = ZOOM_AVATAR_MIN;
+export const PLAYER_DETAILED_MIN_ZOOM = HYST_AVATAR_MODE_MIN;
 export const PLAYER_NEAR_MIN_ZOOM = ZOOM_AVATAR_MAX;
-export const PLAYER_SOCIAL_FULL_ZOOM = ZOOM_AVATAR_SOCIAL_FULL;
+export const PLAYER_SOCIAL_FULL_ZOOM = HYST_AVATAR_MODE_MIN;
 export const AVATAR_VEHICLE_CROSSFADE_START = AVATAR_3D_FADE_START;
 export const AVATAR_VEHICLE_CROSSFADE_END = AVATAR_3D_FADE_END;
+
+export type PresenceDisplayMode = "cluster" | "avatar";
 
 export type PresenceOpacities = {
   cluster: number;
   avatar: number;
   vehicle: number;
+  mode: PresenceDisplayMode;
 };
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
@@ -53,43 +71,63 @@ function clamp01(v: number): number {
 }
 
 /**
- * Stateful zoom controller — hysteresis applies to cluster merge radius only.
- * Opacity is pure smoothstep (no sudden hide/show at band edges).
+ * Stateful zoom controller.
+ * Hysteresis on display mode prevents cluster ↔ avatar flicker during pinch.
+ * Opacity-only handoffs — never drive mount/unmount from zoom ticks.
  */
 export class PlayerPresenceZoomState {
-  private wideClusterRadius = true;
+  private displayMode: PresenceDisplayMode = "cluster";
 
   reset() {
-    this.wideClusterRadius = true;
+    this.displayMode = "cluster";
+  }
+
+  getDisplayMode(): PresenceDisplayMode {
+    return this.displayMode;
+  }
+
+  isClusterMode(): boolean {
+    return this.displayMode === "cluster";
+  }
+
+  isAvatarMode(): boolean {
+    return this.displayMode === "avatar";
   }
 
   /** Call once per zoom tick before reading opacities. */
   update(zoom: number): PresenceOpacities {
-    if (zoom >= HYST_CLUSTER_AVATAR_SHOW_MIN) this.wideClusterRadius = false;
-    if (zoom <= HYST_CLUSTER_AVATAR_HIDE_MAX) this.wideClusterRadius = true;
-
-    const clusterAvatarIn = smoothstep(
-      ZOOM_CLUSTER_AVATAR_FADE_START,
-      ZOOM_CLUSTER_AVATAR_FADE_END,
-      zoom,
-    );
+    if (zoom >= HYST_AVATAR_MODE_MIN) this.displayMode = "avatar";
+    else if (zoom <= HYST_CLUSTER_MODE_MAX) this.displayMode = "cluster";
 
     const avatar3dHandoff = smoothstep(AVATAR_3D_FADE_START, AVATAR_3D_FADE_END, zoom);
     const socialPresence = 1 - avatar3dHandoff;
+    const expandT = getClusterExpandT(zoom);
+    const clusterOp = clamp01(socialPresence * expandT);
+
+    if (this.displayMode === "cluster") {
+      return {
+        mode: "cluster",
+        cluster: clusterOp,
+        avatar: clamp01(socialPresence),
+        vehicle: clamp01(avatar3dHandoff),
+      };
+    }
 
     return {
-      cluster: clamp01((1 - clusterAvatarIn) * socialPresence),
-      avatar: clamp01(clusterAvatarIn * socialPresence),
+      mode: "avatar",
+      cluster: clusterOp,
+      avatar: clamp01(socialPresence),
       vehicle: clamp01(avatar3dHandoff),
     };
   }
 
   getClusterRadius(): number {
-    return this.wideClusterRadius ? 110 : 48;
+    return this.displayMode === "cluster" ? CLUSTER_MERGE_RADIUS_WIDE : CLUSTER_MERGE_RADIUS_TIGHT;
   }
 
   shouldSyncClustersOnPan(zoom: number): boolean {
-    return zoom < AVATAR_3D_FADE_END;
+    this.update(zoom);
+    return this.displayMode === "cluster";
   }
 }
 
@@ -107,9 +145,59 @@ export function getClusterLayerOpacity(zoom: number, state = sharedPresenceState
   return state.update(zoom).cluster;
 }
 
-/** Overlap clusters stay visible through the avatar band (city-scale overcrowding). */
+/** Cluster markers — cluster band opacity only (never max with avatar). */
 export function getClusterDisplayOpacity(opacities: PresenceOpacities): number {
-  return Math.max(opacities.cluster, opacities.avatar);
+  return opacities.cluster;
+}
+
+/** 1 = clusters visible, 0 = individual players (≤12 … ≥15 crossfade). */
+export function getClusterExpandT(zoom: number): number {
+  if (zoom <= ZOOM_CLUSTER_ONLY_MAX) return 1;
+  if (zoom >= CLUSTER_EXPAND_END) return 0;
+  if (zoom < CLUSTER_EXPAND_START) return 1;
+  const t = (zoom - CLUSTER_EXPAND_START) / (CLUSTER_EXPAND_END - CLUSTER_EXPAND_START);
+  const s = t * t * (3 - 2 * t);
+  return 1 - s;
+}
+
+/** 0 = clusters only, 1 = individuals revealed. */
+export function getClusterIndividualRevealT(zoom: number): number {
+  return 1 - getClusterExpandT(zoom);
+}
+
+/** Visual cluster expand progress during zoom 13–14 (disc scale). */
+export function getClusterVisualExpandT(zoom: number): number {
+  if (zoom <= CLUSTER_VISUAL_EXPAND_START) return 0;
+  if (zoom >= CLUSTER_VISUAL_EXPAND_END) return 1;
+  const t =
+    (zoom - CLUSTER_VISUAL_EXPAND_START) /
+    (CLUSTER_VISUAL_EXPAND_END - CLUSTER_VISUAL_EXPAND_START);
+  return t * t * (3 - 2 * t);
+}
+
+/** Interpolate merge radius during cluster ↔ individual handoff. */
+export function getClusterMergeRadiusForZoom(
+  zoom: number,
+  state?: PlayerPresenceZoomState,
+): number {
+  const s = state ?? sharedPresenceState;
+  s.update(zoom);
+  const expandT = getClusterExpandT(zoom);
+  const wide = CLUSTER_MERGE_RADIUS_WIDE;
+  const tight = CLUSTER_MERGE_RADIUS_TIGHT;
+  return wide * expandT + tight * (1 - expandT);
+}
+
+/** Map presence opacity → scale (0.85 at hidden, 1.0 at full). */
+export function presenceScaleFromOpacity(opacity: number): number {
+  const o = clamp01(opacity);
+  return PRESENCE_SCALE_MIN + (PRESENCE_SCALE_MAX - PRESENCE_SCALE_MIN) * o;
+}
+
+/** Cluster mount scale — 1.0 visible → 0.88 hidden (reverse handoff). */
+export function presenceClusterScaleFromOpacity(opacity: number): number {
+  const o = clamp01(opacity);
+  return 0.88 + 0.12 * o;
 }
 
 export function getAvatarMarkerOpacity(zoom: number, state = sharedPresenceState): number {
@@ -137,8 +225,18 @@ export function isClusterLayerVisible(zoom: number, state = sharedPresenceState)
   return getClusterLayerOpacity(zoom, state) > 0.02;
 }
 
+export const ZOOM_LEVEL_BADGE_MIN = 15;
+
+/** Level badge hysteresis — show ≥ 15.0, hide ≤ 14.6. */
+export const HYST_LEVEL_BADGE_SHOW_MIN = 15.0;
+export const HYST_LEVEL_BADGE_HIDE_MAX = 14.6;
+
+/** Avatar prominence hysteresis — show ≥ 14.2, hide ≤ 13.8. */
+export const HYST_AVATAR_SHOW_MIN = 14.2;
+export const HYST_AVATAR_HIDE_MAX = 13.8;
+
 export function showsPlayerLevel(zoom: number): boolean {
-  return zoom >= ZOOM_AVATAR_MIN && zoom < AVATAR_3D_FADE_END;
+  return zoom >= ZOOM_LEVEL_BADGE_MIN;
 }
 
 export function getClusterRadiusForZoom(zoom: number, state = sharedPresenceState): number {
@@ -146,7 +244,6 @@ export function getClusterRadiusForZoom(zoom: number, state = sharedPresenceStat
   return state.getClusterRadius();
 }
 
-/** ~300ms exponential smoothing factor at 60fps (CarLayer display lerp). */
 export function presenceDisplayLerpFactor(): number {
   return 1 - Math.exp(-1 / (PRESENCE_TRANSITION_MS / (1000 / 60)));
 }

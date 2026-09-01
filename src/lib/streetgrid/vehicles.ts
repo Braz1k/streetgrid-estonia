@@ -1,7 +1,15 @@
 // ─── Vehicle progression catalog ─────────────────────────────────────────────
 // Single source of truth for 3D map vehicles, garage progression, and unlocks.
 
-export type VehicleRarity = "common" | "rare" | "epic" | "legendary" | "mythic";
+export type VehicleRarity =
+  | "common"
+  | "uncommon"
+  | "rare"
+  | "epic"
+  | "legendary"
+  | "mythic"
+  | "admin"
+  | "developer";
 
 /** How a vehicle is unlocked. Achievement type reserved for future use. */
 export type UnlockRequirement =
@@ -52,19 +60,136 @@ export type VehicleProgress = {
 export type Rarity = VehicleRarity;
 
 export const RARITY_ORDER: VehicleRarity[] = [
-  "common", "rare", "epic", "legendary", "mythic",
+  "common",
+  "uncommon",
+  "rare",
+  "epic",
+  "legendary",
+  "mythic",
+  "admin",
+  "developer",
 ];
 
-export const RARITY_META: Record<
-  VehicleRarity,
-  { label: string; color: string; border: string; glow: string }
-> = {
-  common:    { label: "Common",    color: "#9CA3AF", border: "#9CA3AF55", glow: "0 0 12px rgba(156,163,175,0.32)" },
-  rare:      { label: "Rare",      color: "#22D3EE", border: "#22D3EE55", glow: "0 0 14px rgba(34,211,238,0.38)" },
-  epic:      { label: "Epic",      color: "#A855F7", border: "#A855F755", glow: "0 0 16px rgba(168,85,247,0.42)" },
-  legendary: { label: "Legendary", color: "#F59E0B", border: "#F59E0B55", glow: "0 0 18px rgba(245,158,11,0.45)" },
-  mythic:    { label: "Mythic",    color: "#FF2D55", border: "#FF2D5566", glow: "0 0 22px rgba(255,45,85,0.52)" },
+/** Canonical STREETGRID rarity colors — markers, garage, UI. */
+export const RARITY_COLORS: Record<VehicleRarity, string> = {
+  common: "#949494",
+  uncommon: "#28D85B",
+  rare: "#00E5FF",
+  epic: "#A855F7",
+  legendary: "#FFCC00",
+  mythic: "#EF4444",
+  admin: "#FFFFFF",
+  developer: "#FF8800",
 };
+
+export type RarityAnimation = "none" | "breathe" | "pulse" | "shimmer";
+
+export type RarityMeta = {
+  label: string;
+  color: string;
+  border: string;
+  glowColor: string;
+  /** @deprecated Ring geometry is uniform — use MARKER_RING_GEOMETRY. Kept for spot/UI compat. */
+  innerGlow: number;
+  /** @deprecated Ring geometry is uniform — use MARKER_RING_GEOMETRY. */
+  outerGlow: number;
+  /** @deprecated Ring geometry is uniform — use MARKER_RING_GEOMETRY. */
+  shadow: number;
+  animation: RarityAnimation;
+  /** Expanding radar rings (spots, high tiers). */
+  pulse: boolean;
+};
+
+/** Locked ring presentation for COMMON → MYTHIC — only hue varies on map rings. */
+const UNIFORM_RING_PRESENTATION = {
+  innerGlow: 0.14,
+  outerGlow: 0.1,
+  shadow: 0.1,
+} as const;
+
+export const RARITY_META: Record<VehicleRarity, RarityMeta> = {
+  common: {
+    label: "Common",
+    color: RARITY_COLORS.common,
+    border: RARITY_COLORS.common,
+    glowColor: RARITY_COLORS.common,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "none",
+    pulse: false,
+  },
+  uncommon: {
+    label: "Uncommon",
+    color: RARITY_COLORS.uncommon,
+    border: RARITY_COLORS.uncommon,
+    glowColor: RARITY_COLORS.uncommon,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "none",
+    pulse: false,
+  },
+  rare: {
+    label: "Rare",
+    color: RARITY_COLORS.rare,
+    border: RARITY_COLORS.rare,
+    glowColor: RARITY_COLORS.rare,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "breathe",
+    pulse: true,
+  },
+  epic: {
+    label: "Epic",
+    color: RARITY_COLORS.epic,
+    border: RARITY_COLORS.epic,
+    glowColor: RARITY_COLORS.epic,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "breathe",
+    pulse: true,
+  },
+  legendary: {
+    label: "Legendary",
+    color: RARITY_COLORS.legendary,
+    border: RARITY_COLORS.legendary,
+    glowColor: RARITY_COLORS.legendary,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "pulse",
+    pulse: true,
+  },
+  mythic: {
+    label: "Mythic",
+    color: RARITY_COLORS.mythic,
+    border: RARITY_COLORS.mythic,
+    glowColor: RARITY_COLORS.mythic,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "pulse",
+    pulse: true,
+  },
+  admin: {
+    label: "Admin",
+    color: RARITY_COLORS.admin,
+    border: RARITY_COLORS.admin,
+    glowColor: RARITY_COLORS.admin,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "shimmer",
+    pulse: true,
+  },
+  developer: {
+    label: "Developer",
+    color: RARITY_COLORS.developer,
+    border: RARITY_COLORS.developer,
+    glowColor: RARITY_COLORS.developer,
+    ...UNIFORM_RING_PRESENTATION,
+    animation: "pulse",
+    pulse: true,
+  },
+};
+
+const VEHICLE_RARITIES = new Set<string>(RARITY_ORDER);
+
+/** Map legacy / unknown rarity strings to a valid tier. */
+export function normalizeVehicleRarity(rarity: string): VehicleRarity {
+  if (rarity === "immortal") return "admin";
+  if (VEHICLE_RARITIES.has(rarity)) return rarity as VehicleRarity;
+  return "common";
+}
 
 export function getRarityRank(rarity: VehicleRarity): number {
   return RARITY_ORDER.indexOf(rarity);
@@ -75,16 +200,8 @@ export function rarityFromRank(rank: number): VehicleRarity {
   return RARITY_ORDER[idx] ?? "common";
 }
 
-/** Premium map-marker tokens — rarity ring, glow, pin tail (compact footprint). */
-export function getMarkerRarityStyles(rarity: VehicleRarity): Record<string, string> {
-  const { color } = RARITY_META[rarity];
-  return {
-    "--rarity-color":       color,
-    "--rarity-glow":        `${color}18`,
-    "--rarity-shadow-soft": `0 0 4px ${color}28, 0 0 10px ${color}0c`,
-    "--rarity-tail-glow":   `0 1px 4px ${color}32`,
-  };
-}
+/** Premium map-marker tokens — delegates to unified rarity rendering. */
+export { getMarkerRarityStyles } from "./rarityRendering";
 
 export function getVehicleColorForSeed(seed: string): string {
   let h = 0;
@@ -156,11 +273,11 @@ export const VEHICLE_CATALOG: VehicleDefinition[] = [
 ];
 
 export const DEFAULT_OWNED: OwnedVehicle[] = [
-  { vehicleId: "bmw_m3", level: 4, xp: 328, acquiredAt: Date.now() - 86400000 * 30 },
+  { vehicleId: "bmw_m3", level: 4, xp: 3250, acquiredAt: Date.now() - 86400000 * 30 },
 ];
 
 /** XP needed to complete one level (bar fills 0→100% within level). */
-export const XP_PER_LEVEL = 400;
+export const XP_PER_LEVEL = 5000;
 
 /** Progress toward next level, 0–100. */
 export function getXpBarPercent(xpInLevel: number): number {

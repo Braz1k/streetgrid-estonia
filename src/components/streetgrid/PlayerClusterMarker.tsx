@@ -1,70 +1,44 @@
-import type { CSSProperties } from "react";
-import { cn } from "@/lib/utils";
+import { memo, type CSSProperties } from "react";
 import {
-  getMarkerRarityStyles,
-  type VehicleRarity,
-} from "@/lib/streetgrid/vehicles";
+  formatClusterCount,
+  getClusterBorderPx,
+  getClusterCountFontPx,
+  getClusterDiameterPx,
+} from "@/lib/streetgrid/playerCluster";
 
 export type PlayerClusterMarkerProps = {
   count: number;
-  rarity: VehicleRarity;
-  /** Up to 3 avatar URLs — shown when count ≥ 10. */
+  /** @deprecated Visual redesign — count-only disc; kept for mount API compat. */
   previewAvatars?: string[];
-  expanding?: boolean;
+  /** 0–1 visual expand during zoom 13–14. */
+  visualExpandT?: number;
 };
 
-function clusterVariant(count: number): "count" | "stack" {
-  return count >= 10 ? "stack" : "count";
-}
-
-/** Premium STREETGRID cluster — count (2–9) or count + avatar stack (10+). */
-export function PlayerClusterMarker({
+/** Premium STREETGRID cluster — dark glass disc, cyan glow, centered count. */
+export const PlayerClusterMarker = memo(function PlayerClusterMarker({
   count,
-  rarity,
-  previewAvatars = [],
-  expanding = false,
+  visualExpandT = 0,
 }: PlayerClusterMarkerProps) {
-  const rarityStyle = getMarkerRarityStyles(rarity) as CSSProperties;
-  const variant = clusterVariant(count);
-  const avatars = previewAvatars.slice(0, 3);
+  const diameter = getClusterDiameterPx(count, visualExpandT);
+  const countFont = getClusterCountFontPx(count, diameter);
+  const border = getClusterBorderPx(diameter);
+
+  const clusterStyle = {
+    "--cluster-size": `${diameter}px`,
+    "--cluster-border": `${border}px`,
+    "--cluster-count-font": `${countFont}px`,
+  } as CSSProperties;
 
   return (
     <button
       type="button"
-      className={cn(
-        "sg-player-cluster",
-        `sg-player-cluster--${rarity}`,
-        `sg-player-cluster--${variant}`,
-        expanding && "sg-player-cluster--expand",
-      )}
-      style={rarityStyle}
-      aria-label={`${count} players nearby`}
+      className="sg-player-cluster"
+      style={clusterStyle}
+      aria-label={`${count} players in cluster`}
     >
-      <span className="sg-player-cluster__glow" aria-hidden />
-
-      {variant === "count" ? (
-        <span className="sg-player-cluster__disc">
-          <span className="sg-player-cluster__count">{count}</span>
-        </span>
-      ) : (
-        <span className="sg-player-cluster__stack">
-          <span className="sg-player-cluster__avatars" aria-hidden>
-            {avatars.map((src, i) => (
-              <img
-                key={`${src}-${i}`}
-                src={src}
-                alt=""
-                className="sg-player-cluster__avatar"
-                draggable={false}
-                width={56}
-                height={56}
-                style={{ zIndex: avatars.length - i }}
-              />
-            ))}
-          </span>
-          <span className="sg-player-cluster__count">{count}</span>
-        </span>
-      )}
+      <span className="sg-player-cluster__disc">
+        <span className="sg-player-cluster__count">{formatClusterCount(count)}</span>
+      </span>
     </button>
   );
-}
+});

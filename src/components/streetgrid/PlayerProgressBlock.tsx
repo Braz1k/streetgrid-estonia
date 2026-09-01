@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { useStreetGrid } from "@/lib/streetgrid/store";
-import { getPlayerLevel, getXpBarPercent } from "@/lib/streetgrid/vehicles";
+import { getPlayerLevel, getXpBarPercent, XP_PER_LEVEL } from "@/lib/streetgrid/vehicles";
 
 export function usePlayerProgress() {
   const { selectedCarId, getOwnedVehicle, vehicleProgress } = useStreetGrid();
   const owned = getOwnedVehicle(selectedCarId);
   const level = owned?.level ?? getPlayerLevel(vehicleProgress);
-  const xp    = owned?.xp ?? 0;
-  const xpPct = getXpBarPercent(xp);
+  const currentXP = owned?.xp ?? 0;
+  const requiredXP = XP_PER_LEVEL;
+  const xpPct = getXpBarPercent(currentXP);
 
   const [xpBar, setXpBar] = useState(xpPct);
   useEffect(() => {
@@ -15,7 +16,7 @@ export function usePlayerProgress() {
     return () => cancelAnimationFrame(id);
   }, [xpPct]);
 
-  return { level, xpPct, xpBar };
+  return { level, currentXP, requiredXP, xpPct, xpBar };
 }
 
 /** XP bar row — sits below LVL • XP% with breathing room. */

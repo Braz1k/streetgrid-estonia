@@ -10,47 +10,75 @@ import {
 } from "@/lib/streetgrid/data";
 import { type Spot, getSpotRarityVisual } from "@/lib/streetgrid/spots";
 import {
+  applyRarityRingVars,
+  getMarkerRingClasses,
+  shouldShowRadarPulse,
+} from "@/lib/streetgrid/markerRendering";
+import { RARITY_META } from "@/lib/streetgrid/vehicles";
+import {
   getVehicleLayerOpacity,
   getSharedPlayerPresenceZoomState,
   PlayerPresenceZoomState,
   setSharedPlayerPresenceZoomState,
   PRESENCE_CROSSFADE_END,
+  presenceDisplayLerpFactor,
+  getClusterExpandT,
+  getClusterMergeRadiusForZoom,
 } from "@/lib/streetgrid/avatarVehicleTransition";
+import { levelBadgeGate } from "@/lib/streetgrid/markerPresenceAnimator";
 import { useStreetGrid } from "@/lib/streetgrid/store";
-import { VEHICLE_CATALOG, getPlayerLevel, getRarityRank, rarityFromRank, getVehicleById, getVehicleColorForSeed } from "@/lib/streetgrid/vehicles";
+import { VEHICLE_CATALOG, getPlayerLevel, getRarityRank, getVehicleById, getVehicleColorForSeed } from "@/lib/streetgrid/vehicles";
 import type { VehicleDefinition } from "@/lib/streetgrid/vehicles";
 import {
-  Layers, Siren, Plus, Clock,
+  Plus, Clock,
   Route as RouteIcon, Search, X,
-  Building,
 } from "lucide-react";
-import { NavModeButton } from "./NavModeButton";
+import { MapActionStack } from "./MapActionStack";
 import { PlayerCardSheet } from "./PlayerCardSheet";
 import type { NavMode } from "@/lib/streetgrid/navMode";
 import { SosModal, type SosPayload } from "./SosModal";
 import { AddSpotModal } from "./AddSpotModal";
 import { SpotDetailPanel } from "./SpotDetailPanel";
 import { getPlayerAvatarUrl } from "@/lib/streetgrid/avatars";
-import type { PlayerMarkerProps } from "./PlayerMarker";
+import type { PlayerMarkerProps } from "./playerMarkerUtils";
 import {
-  mountPlayerClusterMarker,
-  unmountAllPlayerClusterMarkers,
-  unmountPlayerClusterMarker,
-  updatePlayerClusterMarker,
   animatePlayerClusterExpand,
+  unmountAllPlayerClusterMarkers,
   updatePlayerClusterMarkersZoom,
-  CLUSTER_ZOOM_MS,
   type MountedPlayerCluster,
 } from "./playerClusterMount";
+import {
+  ClusterEngine,
+} from "@/lib/streetgrid/clusterEngine";
+import {
+  resetSharedClusterTransitionController,
+} from "@/lib/streetgrid/clusterTransitionController";
+import {
+  resetSharedPlayerMarkerAppearanceController,
+} from "@/lib/streetgrid/playerMarkerAppearance";
 import {
   mountPlayerMarker,
   unmountAllPlayerMarkers,
   unmountPlayerMarker,
   updatePlayerMarkerProps,
   updatePlayerMarkersZoom,
-  refreshPlayerMarkersOnZoom,
+  applyPlayerPresenceOpacity,
+  applyPlayerMarkerZIndex,
+  syncMountedPlayerMarkerViewport,
   type MountedPlayerMarker,
 } from "./playerMarkerMount";
+import {
+  CAMERA_DURATION_MAX_MS,
+  MapCameraController,
+  type MapPadding,
+} from "@/lib/streetgrid/mapCamera";
+import { MAP_MARKER_LAYER, tagMapMarkerLayer } from "@/lib/streetgrid/mapMarkerLayers";
+import {
+  assignDemoPlayersToCities,
+  buildRoadAwareDemoPositions,
+  type AppCoordinate,
+  type DemoCityId,
+} from "@/lib/streetgrid/roadAwarePositioning";
 
 mapboxgl.accessToken =
   "pk.eyJ1IjoiMTEtMTEiLCJhIjoiY21xZTRrejF6MTdqNjJxcXpob2Fqc2c4OSJ9.JZTGEp-_QhQASnJTniUohQ";
@@ -58,19 +86,19 @@ mapboxgl.accessToken =
 // app stores [lat, lng]; Mapbox expects [lng, lat]
 const toLngLat = ([lat, lng]: [number, number]): [number, number] => [lng, lat];
 
+const CITY_COORDS: Record<CityId, { center: [number, number]; zoom: number }> = {
+  all:     { center: [25.0136, 58.5953], zoom: 7 },
+  tallinn: { center: [24.7536, 59.4370], zoom: 13 },
+  tartu:   { center: [26.7290, 58.3780], zoom: 13 },
+  parnu:   { center: [24.5004, 58.3859], zoom: 13 },
+  narva:   { center: [28.1790, 59.3797], zoom: 13 },
+};
+
 const ROUTE_GLOW = "#00f3ff";
 const ROUTE_LINE = "#00f3ff";
 
-// ─── Waze camera constants ─────────────────────────────────────────────────────
-//
-// pitch:60  zoom:16.5  padding.top:410  → car sits firmly in the lower third,
-// road ahead fills the upper two-thirds — matches reference images exactly.
-//
 const WAZE_ZOOM    = 16.5;
 const WAZE_PITCH   = 60;
-const WAZE_PADDING = { top: 410, bottom: 0, left: 0, right: 0 } as const;
-
-// ─── Types ────────────────────────────────────────────────────────────────────
 
 type Props = {
   city: CityId;
@@ -81,7 +109,14 @@ type Props = {
 
 type Bot = {
   id: string; name: string; car: string; emoji: string;
-  coords: [number, number]; patrol?: boolean;
+  coords: [number, number]; city: DemoCityId; patrol?: boolean;
+};
+
+const DEMO_BOT_CITIES: Record<"b1" | "b2" | "b3" | "patrol", DemoCityId> = {
+  b1: "tallinn",
+  b2: "tartu",
+  b3: "parnu",
+  patrol: "narva",
 };
 
 type ActiveRoute = {
@@ -99,145 +134,11 @@ const MARKER_THEMES: Record<MarkerRole, { border: string; glow: string; pulse: b
   sos:          { border: "#ff0033", glow: "0 0 8px rgba(255,0,51,0.45),0 0 22px rgba(255,0,51,0.24)", pulse: true  },
 };
 
-/** Screen-space merge radius — matches 48px cluster footprint. */
-const PLAYER_CLUSTER_RADIUS = 48;
-const CLUSTER_MIN_POINTS = 2;
-
-type ScreenPlayerGroup =
-  | {
-      type: "cluster";
-      key: string;
-      count: number;
-      coords: [number, number];
-      rarity: VehicleRarity;
-      members: UserProfile[];
-    }
-  | { type: "player"; user: UserProfile };
-
 function clusterPreviewAvatars(members: UserProfile[]): string[] {
   return [...members]
     .sort((a, b) => getRarityRank(b.rarity) - getRarityRank(a.rarity))
     .slice(0, 3)
     .map((u) => getPlayerAvatarUrl(u));
-}
-
-/** Screen-space overlap clustering — merges pins within radius. */
-function clusterPlayersOnScreen(
-  map: mapboxgl.Map,
-  users: UserProfile[],
-  radius = PLAYER_CLUSTER_RADIUS,
-): ScreenPlayerGroup[] {
-  const n = users.length;
-  if (n === 0) return [];
-
-  const parent = Array.from({ length: n }, (_, i) => i);
-  const find = (i: number): number => {
-    if (parent[i] !== i) parent[i] = find(parent[i]);
-    return parent[i];
-  };
-  const unite = (a: number, b: number) => {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra !== rb) parent[rb] = ra;
-  };
-
-  const projected = users.map((u) => map.project(toLngLat(u.location)));
-  const r2 = radius * radius;
-
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const dx = projected[i].x - projected[j].x;
-      const dy = projected[i].y - projected[j].y;
-      if (dx * dx + dy * dy <= r2) unite(i, j);
-    }
-  }
-
-  const groups = new Map<number, number[]>();
-  for (let i = 0; i < n; i++) {
-    const root = find(i);
-    const g = groups.get(root) ?? [];
-    g.push(i);
-    groups.set(root, g);
-  }
-
-  const results: ScreenPlayerGroup[] = [];
-  for (const indices of groups.values()) {
-    if (indices.length >= CLUSTER_MIN_POINTS) {
-      let lngSum = 0;
-      let latSum = 0;
-      let maxRank = 0;
-      const ids: string[] = [];
-      for (const idx of indices) {
-        const u = users[idx];
-        ids.push(u.id);
-        const [lng, lat] = toLngLat(u.location);
-        lngSum += lng;
-        latSum += lat;
-        maxRank = Math.max(maxRank, getRarityRank(u.rarity));
-      }
-      const count = indices.length;
-      const members = indices.map((idx) => users[idx]);
-      results.push({
-        type: "cluster",
-        key: `cluster-${[...ids].sort().join("-")}`,
-        count,
-        coords: [lngSum / count, latSum / count],
-        rarity: rarityFromRank(maxRank),
-        members,
-      });
-    } else {
-      results.push({ type: "player", user: users[indices[0]] });
-    }
-  }
-  return results;
-}
-
-const CLUSTER_FIT_PADDING = { top: 88, bottom: 128, left: 64, right: 64 } as const;
-
-/** Fit map to all players in a cluster (lng/lat bounds). */
-function fitMapToClusterMembers(
-  map: mapboxgl.Map,
-  members: UserProfile[],
-  maxZoom: number,
-  duration: number,
-) {
-  if (members.length === 0) return;
-
-  let minLng = Infinity;
-  let maxLng = -Infinity;
-  let minLat = Infinity;
-  let maxLat = -Infinity;
-
-  for (const u of members) {
-    const [lng, lat] = toLngLat(u.location);
-    minLng = Math.min(minLng, lng);
-    maxLng = Math.max(maxLng, lng);
-    minLat = Math.min(minLat, lat);
-    maxLat = Math.max(maxLat, lat);
-  }
-
-  if (members.length === 1) {
-    map.easeTo({
-      center: [minLng, minLat],
-      zoom: Math.min(map.getZoom() + 1.4, maxZoom),
-      duration,
-      easing: (t) => t * (2 - t),
-    });
-    return;
-  }
-
-  map.fitBounds(
-    [
-      [minLng, minLat],
-      [maxLng, maxLat],
-    ],
-    {
-      padding: CLUSTER_FIT_PADDING,
-      maxZoom,
-      duration,
-      easing: (t) => t * (2 - t),
-    },
-  );
 }
 
 function distKm(a: [number, number], b: [number, number]): number {
@@ -252,9 +153,8 @@ function distKm(a: [number, number], b: [number, number]): number {
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
-function getOnlinePlayersForMap(city: CityId): UserProfile[] {
-  if (city !== "tallinn" && city !== "all") return [];
-  return USERS.filter((u) => u.status !== "offline");
+function getOnlinePlayersForMap(): UserProfile[] {
+  return USERS.filter((u) => u.id !== ME.id && u.status !== "offline");
 }
 
 function playersToGeoJson(users: UserProfile[]): GeoJSON.FeatureCollection {
@@ -271,6 +171,62 @@ function playersToGeoJson(users: UserProfile[]): GeoJSON.FeatureCollection {
     })),
   };
 }
+
+type UserLocationFix = {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  heading: number | null;
+  timestamp: number;
+};
+
+type UserLocation = {
+  latitude: number | null;
+  longitude: number | null;
+  accuracy: number | null;
+  heading: number | null;
+  timestamp: number | null;
+  status: "idle" | "active";
+};
+
+function validateLocationFix(next: UserLocationFix): boolean {
+  return (
+    Number.isFinite(next.latitude) &&
+    Number.isFinite(next.longitude) &&
+    Math.abs(next.latitude) <= 90 &&
+    Math.abs(next.longitude) <= 180 &&
+    Number.isFinite(next.accuracy) &&
+    next.accuracy > 0
+  );
+}
+
+function getValidLocationFix(location: UserLocation): UserLocationFix | null {
+  if (
+    location.status !== "active" ||
+    location.latitude == null ||
+    location.longitude == null ||
+    location.accuracy == null ||
+    location.timestamp == null
+  ) {
+    return null;
+  }
+  return {
+    latitude: location.latitude,
+    longitude: location.longitude,
+    accuracy: location.accuracy,
+    heading: location.heading,
+    timestamp: location.timestamp,
+  };
+}
+
+const IDLE_USER_LOCATION: UserLocation = {
+  latitude: ME.location[0],
+  longitude: ME.location[1],
+  accuracy: null,
+  heading: null,
+  timestamp: null,
+  status: "idle",
+};
 
 const routeBtnHtml = (id: string) =>
   `<button data-route="${id}" style="margin-top:6px;background:#00f0ff;color:#001;padding:5px 10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:11px">🧭 ПОЕХАЛИ</button>`;
@@ -574,21 +530,18 @@ class CarLayer {
   private currentCarId:   string;
 
   private readonly cars:       VehicleDefinition[];
-  private readonly posRef:     { current: [number, number] };
-  private readonly headingRef: { current: number };
+  private readonly userLocationRef: { current: UserLocation };
   private _lastOpacity = -1;
   private _displayOpacity = 0;
 
   constructor(
     initialCarId: string,
     cars:         VehicleDefinition[],
-    posRef:       { current: [number, number] },
-    headingRef:   { current: number },
+    userLocationRef: { current: UserLocation },
   ) {
     this.currentCarId = initialCarId;
     this.cars         = cars;
-    this.posRef       = posRef;
-    this.headingRef   = headingRef;
+    this.userLocationRef = userLocationRef;
   }
 
   onAdd(map: mapboxgl.Map, gl: WebGLRenderingContext) {
@@ -698,9 +651,15 @@ class CarLayer {
   }
 
   render(_gl: WebGLRenderingContext, matrix: number[]) {
+    const location = this.userLocationRef.current;
+    const lat = location.latitude;
+    const lng = location.longitude;
+    const hasLocation =
+      lat != null &&
+      lng != null;
     const zoom    = this._map.getZoom();
-    const target  = this._getZoomOpacity(zoom);
-    const lerp    = 1 - Math.exp(-1 / (300 / (1000 / 60)));
+    const target  = hasLocation ? this._getZoomOpacity(zoom) : 0;
+    const lerp    = presenceDisplayLerpFactor();
     this._displayOpacity += (target - this._displayOpacity) * lerp;
     const opacity = this._displayOpacity;
 
@@ -722,13 +681,13 @@ class CarLayer {
     if (glowVisible) this._updateGlowPulse(opacity);
 
     // Avatar marker visible below crossfade — skip WebGL draw when fully faded.
-    if (opacity <= 0.0) return;
+    if (opacity <= 0.0 || lat == null || lng == null) return;
 
     // Smooth heading interpolation — Waze-style gradual turn
-    const dh          = ((this.headingRef.current - this.smoothHeading + 540) % 360) - 180;
+    const targetHeading = location.heading ?? this.smoothHeading;
+    const dh          = ((targetHeading - this.smoothHeading + 540) % 360) - 180;
     this.smoothHeading = (this.smoothHeading + dh * 0.12 + 360) % 360;
 
-    const [lat, lng] = this.posRef.current;
     const mercator   = mapboxgl.MercatorCoordinate.fromLngLat([lng, lat], 0);
     const scale      = mercator.meterInMercatorCoordinateUnits() * CAR_MODEL_SCALE;
 
@@ -814,28 +773,24 @@ function makeMarkerEl(
 }
 
 function makeSpotMarkerEl(spot: Spot, onClick: () => void): HTMLDivElement {
-  const visual = getSpotRarityVisual(spot.rarity);
+  const meta = RARITY_META[spot.rarity];
   const wrap   = document.createElement("div");
-  wrap.className = `sg-spot-rarity sg-spot-rarity--${spot.rarity} sg-spot-float`;
-  wrap.style.setProperty("--spot-color", visual.color);
+  wrap.className = "sg-rarity-marker sg-rarity-marker--spot sg-spot-float";
+  tagMapMarkerLayer(wrap, MAP_MARKER_LAYER.poi);
 
-  if (visual.pulse) {
-    for (const delay of ["", " sg-spot-rarity__ring--delay"]) {
+  if (shouldShowRadarPulse(spot.rarity)) {
+    for (const delay of ["", " sg-marker-ring__radar--delay sg-rarity-ring__radar--delay"]) {
       const ring = document.createElement("span");
-      ring.className = `sg-spot-rarity__ring${delay}`;
+      ring.className = `sg-marker-ring__radar sg-rarity-ring__radar${delay}`;
+      ring.style.setProperty("--rarity-border", meta.border);
       wrap.appendChild(ring);
     }
   }
 
-  const halo = document.createElement("span");
-  halo.className = "sg-spot-rarity__halo";
-  wrap.appendChild(halo);
-
   const core = document.createElement("button");
   core.type = "button";
-  core.className = "sg-spot-rarity__core";
-  core.style.borderColor = visual.color;
-  core.style.boxShadow   = visual.glow;
+  core.className = getMarkerRingClasses(spot.rarity, { variant: "spot" }).join(" ");
+  applyRarityRingVars(core, spot.rarity);
   core.textContent = spot.icon;
   core.title = spot.name;
   core.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
@@ -893,10 +848,12 @@ function makeClusterEl(count: number): HTMLDivElement {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) {
-  const { settings, pushChat, selectedCarId, profile, vehicleProgress, addDrivingDistance, recordSpotVisit, recordEvent } = useStreetGrid();
+  const { settings, pushChat, selectedCarId, profile, vehicleProgress, recordSpotVisit, recordEvent } = useStreetGrid();
 
   const containerRef         = useRef<HTMLDivElement>(null);
   const mapRef               = useRef<mapboxgl.Map | null>(null);
+  const wazePaddingRef       = useRef<MapPadding>({ top: 0, bottom: 0, left: 0, right: 0 });
+  const cameraRef            = useRef(new MapCameraController());
   const featureMarkersRef    = useRef<mapboxgl.Marker[]>([]);
   const playerMarkersRef     = useRef<MountedPlayerMarker[]>([]);
   const playerClusterMarkersRef = useRef<Record<string, MountedPlayerCluster>>({});
@@ -908,11 +865,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const spotRenderCleanupRef = useRef<(() => void) | null>(null);
   // 3D car layer — created in map.on('load'), swapped on garage selection
   const carLayerRef          = useRef<CarLayer | null>(null);
-  // GPS position updated in watchPosition; read each frame by CarLayer.render
-  const carPositionRef       = useRef<[number, number]>(ME.location);
+  const userLocationRef = useRef<UserLocation>({ ...IDLE_USER_LOCATION });
+  const hasInitializedCityCameraRef = useRef(false);
   // Heading tracking — kept in refs to avoid stale closures
   const headingRef           = useRef<number>(0);
-  const prevPosRef           = useRef<[number, number] | null>(null);
 
   const [ready,         setReady]         = useState(false);
   const [sosOpen,       setSosOpen]       = useState(false);
@@ -928,19 +884,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const [searchOpen,    setSearchOpen]    = useState(false);
   const [selectedPlayer, setSelectedPlayer] = useState<UserProfile | null>(null);
   const [playerToast,    setPlayerToast]    = useState<string | null>(null);
-  // GPS permission / availability status used to drive the overlay.
-  // 'loading'  — waiting for first position or permission answer
-  // 'granted'  — at least one position received (or user skipped)
-  // 'denied'   — watchPosition error code 1 (PERMISSION_DENIED) or 2 (UNAVAILABLE)
-  const [gpsStatus, setGpsStatus] = useState<"loading" | "granted" | "denied">("loading");
-  // Incrementing this re-runs the watchPosition effect (retry after denial).
-  const [gpsAttempt, setGpsAttempt] = useState(0);
-  // True once the first GPS callback has arrived; used to detect the initial flyTo.
-  const [hasInitialPosition, setHasInitialPosition] = useState(false);
-  // True only when the last fix had accuracy ≤ 1000 m — drives the coarse badge.
-  const [isPreciseLocation, setIsPreciseLocation] = useState(false);
-  // Latest GPS snapshot — drives the reactive camera effect.
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number; heading: number } | null>(null);
+  const [userLocation, setUserLocation] =
+    useState<UserLocation>({ ...IDLE_USER_LOCATION });
+  const [demoRoadPositions, setDemoRoadPositions] =
+    useState<Record<string, AppCoordinate>>({});
+  const commitUserLocation = useCallback((next: UserLocation) => {
+    userLocationRef.current = next;
+    setUserLocation(next);
+  }, []);
   // Set to true around programmatic easeTo/flyTo so gesture listeners don't
   // accidentally flip navMode to FREE during our own animations.
   const isProgrammaticRef = useRef(false);
@@ -960,10 +911,26 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // Ref mirror lets mount-only closures (zoom / gesture event handlers) always
   // read the latest navMode without stale-closure issues.
   const navModeRef = useRef<NavMode>("FREE");
-  useEffect(() => { navModeRef.current = navMode; }, [navMode]);
+  useEffect(() => {
+    navModeRef.current = navMode;
+  }, [navMode]);
 
   // Whether 3D building fill-extrusion layers are visible.
   const [showBuildings, setShowBuildings] = useState(true);
+
+  const syncMapPadding = useCallback(() => {
+    const map = mapRef.current;
+    const camera = cameraRef.current;
+    if (!map) return wazePaddingRef.current;
+    const next = camera.syncPadding({
+      searchOpen,
+      playerSheetOpen: selectedPlayer != null,
+      routeBanner: activeRoute != null,
+      navMode,
+    });
+    wazePaddingRef.current = next;
+    return next;
+  }, [searchOpen, selectedPlayer, activeRoute, navMode]);
 
   const cityObj      = getCity(city);
   const allSpots     = [...SPOTS, ...userSpots];
@@ -973,6 +940,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   useEffect(() => {
     carLayerRef.current?.swapCar(selectedCarId);
   }, [selectedCarId, ready]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      syncMapPadding();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [syncMapPadding, ready]);
 
   // ── Init map ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -994,7 +971,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     });
 
     map.on("load", () => {
-      // Pre-register the GLB asset with Mapbox's native model system (GL JS ≥ 3.0).
+      cameraRef.current.attach(map);
+      cameraRef.current.onProgrammatic = (v) => {
+        isProgrammaticRef.current = v;
+      };
+
+      // Map framing — dynamic safe-area padding (mapCamera.ts)
+      syncMapPadding();
       // Wrapped in try/catch so an absent file or unsupported API never crashes the map.
       // The Three.js CarLayer below loads the same path independently via GLTFLoader.
       try {
@@ -1003,10 +986,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         // addModel not available in this Mapbox version, or file not found — safe to ignore
       }
 
-      // Waze camera padding — persists across all camera moves
-      map.setPadding(WAZE_PADDING);
-
-      // Soft atmospheric depth between distant buildings — dark cyber palette
+      // Pre-register the GLB asset with Mapbox's native model system (GL JS ≥ 3.0).
       map.setFog({
         color:          "rgb(10, 12, 20)",
         "high-color":   "rgb(22, 26, 40)",
@@ -1018,8 +998,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
       // Re-enforce pitch if user pinch-zooms it away
       map.on("pitchend", () => {
-        if (map.getPitch() < WAZE_PITCH - 5) {
-          map.easeTo({ pitch: WAZE_PITCH, duration: 400 });
+        if (navModeRef.current === "DRIVE" && !isProgrammaticRef.current) {
+          cameraRef.current.ensurePitch(WAZE_PITCH);
         }
       });
 
@@ -1092,7 +1072,9 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
       // ── 3D car layer (Three.js custom layer) ───────────────────────────────
       const layer = new CarLayer(
-        VEHICLE_CATALOG[0].id, VEHICLE_CATALOG, carPositionRef, headingRef,
+        VEHICLE_CATALOG[0].id,
+        VEHICLE_CATALOG,
+        userLocationRef,
       );
       carLayerRef.current = layer;
       map.addLayer(layer as unknown as mapboxgl.CustomLayerInterface);
@@ -1108,25 +1090,21 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     // Any user-initiated drag, pitch, or rotate → hand camera back to FREE.
     // isProgrammaticRef prevents our own animations from triggering this.
     const onUserGesture = () => {
-      if (!isProgrammaticRef.current) setNavMode("FREE");
+      if (!isProgrammaticRef.current) {
+        navModeRef.current = "FREE";
+        setNavMode("FREE");
+      }
     };
     map.on("dragstart",   onUserGesture);
     map.on("pitchstart",  onUserGesture);
     map.on("rotatestart", onUserGesture);
-
-    // Touch / scroll zoom — in FOLLOW or DRIVE mode, keep the car centred so
-    // it never drifts toward the pinch midpoint during zoom gestures.
-    map.on("zoom", (e) => {
-      if ((e as mapboxgl.MapMouseEvent).originalEvent && navModeRef.current !== "FREE") {
-        const [lat, lng] = carPositionRef.current;
-        map.setCenter([lng, lat]);
-      }
-    });
+    map.on("zoomstart",   onUserGesture);
 
     map.touchPitch.enable();
     mapRef.current = map;
 
     return () => {
+      cameraRef.current.detach();
       map.remove();
       mapRef.current    = null;
       carLayerRef.current = null;
@@ -1134,166 +1112,69 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Geolocation: raw GPS → refs + state ──────────────────────────────────────
-  //
-  // This effect ONLY updates refs (for the Three.js render loop) and the
-  // userCoords state (which drives the reactive camera effect below).
-  // Camera movement is handled by the separate reactive effect below.
-  //
+  // Keep one browser geolocation subscription alive for the MapView lifetime.
+  // GPS updates move YOU/BMW only; camera movement remains an explicit action.
   useEffect(() => {
-    // If the Geolocation API is completely absent (e.g. insecure origin), bail out.
-    if (!navigator.geolocation) {
-      console.error("[GPS] navigator.geolocation is not available");
-      setGpsStatus("denied");
-      return;
-    }
-
-    // Reset to loading on each attempt so the overlay shows the spinner again.
-    setGpsStatus("loading");
+    if (!navigator.geolocation) return;
 
     const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const { latitude, longitude, heading } = pos.coords;
-        let h: number | null = heading;
+      (position) => {
+        const { latitude, longitude, accuracy, heading } = position.coords;
+        const fix: UserLocationFix = {
+          latitude,
+          longitude,
+          accuracy,
+          heading: heading != null && Number.isFinite(heading) ? heading : null,
+          timestamp: position.timestamp,
+        };
+        if (!validateLocationFix(fix)) return;
 
-        // Compute bearing from position delta when device heading is unavailable
-        const prev = prevPosRef.current;
-        if (prev) {
-          const km = distKm(prev, [latitude, longitude]);
-          if (km >= 0.003) addDrivingDistance(km);
-        }
-        if ((h == null || isNaN(h)) && prev) {
-          const [pLat, pLng] = prev;
-          const dLat = latitude - pLat;
-          const dLng = longitude - pLng;
-          if (Math.hypot(dLat, dLng) > 0.00005) {
-            h = ((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360;
-          }
-        }
-        prevPosRef.current = [latitude, longitude];
-
-        // Keep Three.js refs current — CarLayer.render reads these every frame
-        carPositionRef.current = [latitude, longitude];
-        if (h != null && !isNaN(h)) headingRef.current = h;
-
-        // Mark permission as granted; track whether this is a precise fix.
-        // isPreciseLocation drives the "Approximate location" badge.
-        setGpsStatus("granted");
-        setIsPreciseLocation(pos.coords.accuracy <= 1000);
-
-        // Publish to React state unconditionally — the reactive camera effect
-        // now receives all positions. hasInitialPosition will be set on the very
-        // first call here, dismissing the loading overlay regardless of accuracy.
-        // The "Approximate location" badge then signals coarse-location state.
-        setUserCoords({ lat: latitude, lng: longitude, heading: headingRef.current });
+        const next: UserLocation = {
+          ...fix,
+          heading: fix.heading ?? userLocationRef.current.heading,
+          status: "active",
+        };
+        if (next.heading != null) headingRef.current = next.heading;
+        commitUserLocation(next);
+        mapRef.current?.triggerRepaint();
       },
-      (err) => {
-        // Log every error so it is visible in DevTools / remote consoles.
-        console.error(`[GPS] watchPosition error — code ${err.code}: ${err.message}`);
-
-        if (err.code === 3) {
-          // TIMEOUT (code 3) — browser couldn't get a high-accuracy fix in 5 s.
-          // Map-first: the map is already showing; just log and keep watching.
-          // The browser will continue trying — no badge needed for a transient timeout.
-          console.warn("[GPS] Timeout — continuing to watch for position");
-        } else {
-          // PERMISSION_DENIED (1) or POSITION_UNAVAILABLE (2) — show warning badge.
-          setGpsStatus("denied");
-        }
+      () => {
+        // Keep the watcher alive after transient errors, including TIMEOUT.
+        // The last accepted user location remains unchanged.
       },
-      { enableHighAccuracy: true, maximumAge: 400, timeout: 5000 },
+      {
+        enableHighAccuracy: true,
+        timeout: 5_000,
+        maximumAge: 400,
+      },
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [gpsAttempt, addDrivingDistance]); // gpsAttempt increments on user retry — restarts the watch
+  }, [commitUserLocation]);
 
-  // ── Reactive GPS camera effect ────────────────────────────────────────────────
-  //
-  // navMode is the single driver — no secondary cameraMode system.
-  //
-  //   FREE   → circle marker updates; camera stays where the user left it.
-  //   FOLLOW → easeTo(centre only) on every GPS tick.
-  //   DRIVE  → easeTo(centre + zoom 18 + pitch 65 + heading bearing + padding).
-  //
-  // First GPS arrival: always flyTo the user's position and activate DRIVE.
-  //
-  // isProgrammaticRef guards against the synchronous movestart / pitchstart
-  // events fired by easeTo/flyTo setting navMode back to FREE.
-  //
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !userCoords) return;
-
-    // First GPS fix — fly from Tallinn overview to user's street-level position.
-    if (!hasInitialPosition) {
-      setHasInitialPosition(true);
-      setNavMode("DRIVE");
-      isProgrammaticRef.current = true;
-      map.flyTo({
-        center:    [userCoords.lng, userCoords.lat],
-        zoom:      18.0,
-        pitch:     65,
-        bearing:   userCoords.heading,
-        padding:   WAZE_PADDING,
-        duration:  2000,
-        essential: true,
-      });
-      isProgrammaticRef.current = false;
-      return;
-    }
-
-    // 3. Subsequent GPS ticks — navMode is the sole arbiter.
-    if (navMode === "FREE") return; // camera belongs to the user
-
-    isProgrammaticRef.current = true;
-    if (navMode === "DRIVE") {
-      map.easeTo({
-        center:   [userCoords.lng, userCoords.lat],
-        zoom:     18.0,
-        pitch:    65,
-        bearing:  userCoords.heading,
-        padding:  WAZE_PADDING,
-        duration: 1000,
-        essential: true,
-      });
-    } else {
-      // FOLLOW — recentre only; pitch and bearing stay where the user left them.
-      map.easeTo({
-        center:   [userCoords.lng, userCoords.lat],
-        duration: 600,
-        essential: true,
-      });
-    }
-    isProgrammaticRef.current = false;
-  }, [userCoords, navMode, hasInitialPosition]);
-
-  // ── Fly to city / Waze mode on tab switch ─────────────────────────────────────
   useEffect(() => {
     if (!ready) return;
-    const map = mapRef.current;
-    if (!map) return;
+    syncMapPadding();
+  }, [ready, syncMapPadding]);
 
-    if (city === "tallinn" || city === "all") {
-      // For Tallinn/all the GPS reactive effect drives the camera position.
-      // Only restore the Waze padding so the car stays in the lower third.
-      // navMode is left unchanged — no reason to override the user's current choice.
-      map.setPadding(WAZE_PADDING);
-    } else {
-      // Other cities: release GPS follow and fly to the city overview.
-      setNavMode("FREE");
-      map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
-      isProgrammaticRef.current = true;
-      map.flyTo({
-        center:   toLngLat(cityObj.coords),
-        zoom:     cityObj.zoom,
-        pitch:    WAZE_PITCH,
-        bearing:  0,
-        duration: 2000,
-        essential: true,
-      });
-      isProgrammaticRef.current = false;
+  // ── Fly to city on chip tap ───────────────────────────────────────────────────
+  useEffect(() => {
+    if (!ready) return;
+    if (!hasInitializedCityCameraRef.current) {
+      hasInitializedCityCameraRef.current = true;
+      return;
     }
-  }, [city, ready, cityObj.coords, cityObj.zoom]);
+    const target = CITY_COORDS[city];
+    navModeRef.current = "FREE";
+    setNavMode("FREE");
+    syncMapPadding();
+    cameraRef.current.flyTo({
+      center: target.center,
+      zoom: target.zoom,
+      pitch: city === "all" ? 0 : 45,
+      bearing: 0,
+    });
+  }, [city, ready, syncMapPadding]);
 
   // ── Buildings visibility ──────────────────────────────────────────────────────
   // Toggles all fill-extrusion (3D building) layers in the Mapbox style.
@@ -1313,39 +1194,77 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     }
   }, [showBuildings, ready]);
 
+  // ── Road-aware demo population ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!ready) {
+      setDemoRoadPositions({});
+      return;
+    }
+
+    const controller = new AbortController();
+    const userAssignments = assignDemoPlayersToCities(
+      getOnlinePlayersForMap().map((user) => user.id),
+    );
+    const botAssignments = Object.entries(DEMO_BOT_CITIES).map(([id, botCity]) => ({
+      id,
+      city: botCity,
+    }));
+    const assignments = [
+      ...userAssignments,
+      ...botAssignments,
+    ];
+
+    void buildRoadAwareDemoPositions(assignments, controller.signal)
+      .then((positions) => {
+        if (controller.signal.aborted) return;
+        setDemoRoadPositions(positions);
+        if (import.meta.env.DEV) {
+          console.info(
+            `[StreetGrid roads] ${Object.keys(positions).length} deterministic multi-city demo positions loaded from OSRM driving geometry.`,
+          );
+        }
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setDemoRoadPositions({});
+        console.error(
+          "[StreetGrid roads] Demo players hidden because drivable road geometry could not be loaded.",
+          error,
+        );
+      });
+
+    return () => controller.abort();
+  }, [ready]);
+
   // ── Bots simulation ───────────────────────────────────────────────────────────
   useEffect(() => {
-    const base = cityObj.coords;
-    const r    = city === "all" ? 0.5 : 0.012;
+    const required = ["b1", "b2", "b3"] as const;
+    if (required.some((id) => !demoRoadPositions[id])) {
+      setBots([]);
+      return;
+    }
+
     const init: Bot[] = [
-      { id: "b1", name: "Никита",  car: "BMW M4",       emoji: "🏎️", coords: [base[0] + r,       base[1] + r] },
-      { id: "b2", name: "Артур",   car: "Toyota Supra", emoji: "🚗", coords: [base[0] - r,       base[1] + r * 0.6] },
-      { id: "b3", name: "Кристи",  car: "Subaru WRX",   emoji: "🚙", coords: [base[0] + r * 0.4, base[1] - r] },
+      { id: "b1", name: "Никита", car: "BMW M4", emoji: "🏎️", city: DEMO_BOT_CITIES.b1, coords: demoRoadPositions.b1 },
+      { id: "b2", name: "Артур", car: "Toyota Supra", emoji: "🚗", city: DEMO_BOT_CITIES.b2, coords: demoRoadPositions.b2 },
+      { id: "b3", name: "Кристи", car: "Subaru WRX", emoji: "🚙", city: DEMO_BOT_CITIES.b3, coords: demoRoadPositions.b3 },
     ];
     setBots(init);
-    const tick = setInterval(() => {
-      setBots((prev) => prev.map((b) => ({
-        ...b,
-        coords: [
-          b.coords[0] + (Math.random() - 0.5) * r * 0.25,
-          b.coords[1] + (Math.random() - 0.5) * r * 0.25,
-        ] as [number, number],
-      })));
-    }, 2500);
+
     const patrolTick = setInterval(() => {
       setBots((prev) => {
         if (prev.some((b) => b.patrol)) return prev.filter((b) => !b.patrol);
+        const patrolPosition = demoRoadPositions.patrol;
+        if (!patrolPosition) return prev;
         return [...prev, {
           id: "patrol", name: "Патруль", car: "Politsei", emoji: "🚓", patrol: true,
-          coords: [
-            base[0] + (Math.random() - 0.5) * r * 1.5,
-            base[1] + (Math.random() - 0.5) * r * 1.5,
-          ] as [number, number],
+          city: DEMO_BOT_CITIES.patrol,
+          coords: patrolPosition,
         }];
       });
     }, 15000);
-    return () => { clearInterval(tick); clearInterval(patrolTick); };
-  }, [city, cityObj.coords]);
+    return () => clearInterval(patrolTick);
+  }, [demoRoadPositions]);
 
   // ── Route drawing ─────────────────────────────────────────────────────────────
   const setRouteGeoJson = useCallback((geometry: GeoJSON.LineString | null) => {
@@ -1357,19 +1276,25 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   const fitRouteBounds = useCallback((coords: [number, number][]) => {
     if (coords.length < 2) return;
-    setNavMode("FREE"); // release GPS follow while showing the full route
+    setNavMode("FREE");
+    const map = mapRef.current;
+    if (!map) return;
+    syncMapPadding();
     const bounds = coords.reduce((b, c) => b.extend(c), new mapboxgl.LngLatBounds(coords[0], coords[0]));
-    isProgrammaticRef.current = true;
-    mapRef.current?.fitBounds(bounds, {
-      padding: { top: 140, bottom: 180, left: 60, right: 60 },
-      pitch: WAZE_PITCH, bearing: headingRef.current, duration: 1400, essential: true,
+    cameraRef.current.fitBounds(bounds, {
+      pitch: WAZE_PITCH,
+      bearing: headingRef.current,
     });
-    isProgrammaticRef.current = false;
-  }, []);
+  }, [syncMapPadding]);
 
   const runRouteTo = useCallback(async (dest: [number, number], name: string) => {
-    // Always start from the live GPS position, not the static spawn point
-    const [oLng, oLat] = toLngLat(carPositionRef.current);
+    // Routing starts from raw browser GPS; never from a demo/default position.
+    const rawOrigin = getValidLocationFix(userLocationRef.current);
+    if (!rawOrigin) {
+      console.error("[GPS] Cannot start route before a browser position is available");
+      return;
+    }
+    const [oLng, oLat] = toLngLat([rawOrigin.latitude, rawOrigin.longitude]);
     const [dLng, dLat] = toLngLat(dest);
     try {
       const url  = `https://router.project-osrm.org/route/v1/driving/${oLng},${oLat};${dLng},${dLat}?overview=full&geometries=geojson`;
@@ -1398,14 +1323,16 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     window.setTimeout(() => setPlayerToast(null), 2400);
   }, []);
 
-  const myLocation = userCoords
-    ? ([userCoords.lat, userCoords.lng] as [number, number])
-    : carPositionRef.current;
+  const validUserLocation = getValidLocationFix(userLocation);
+  const myLocation = validUserLocation
+    ? [validUserLocation.latitude, validUserLocation.longitude] as AppCoordinate
+    : null;
+  const hasUserDisplayPosition =
+    userLocation.latitude != null && userLocation.longitude != null;
 
-  const selectedPlayerDistance = selectedPlayer
+  const selectedPlayerDistance = selectedPlayer && myLocation
     ? distKm(myLocation, selectedPlayer.location)
     : null;
-
   // ── Live players: mount once, opacity on zoom, sync clusters on pan ───────────
   useEffect(() => {
     const map = mapRef.current;
@@ -1417,7 +1344,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     playerRenderCleanupRef.current?.();
     playerRenderCleanupRef.current = null;
 
-    const onlineUsers = getOnlinePlayersForMap(city);
+    const onlineUsers = getOnlinePlayersForMap().flatMap((user) => {
+      const roadPosition = demoRoadPositions[user.id];
+      return roadPosition ? [{ ...user, location: roadPosition }] : [];
+    });
     const presenceZoom = new PlayerPresenceZoomState();
     setSharedPlayerPresenceZoomState(presenceZoom);
 
@@ -1432,10 +1362,24 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       playerClusterMarkersRef.current = {};
     };
 
-    if (!layers.users || (city !== "tallinn" && city !== "all")) {
+    if (!layers.users) {
       clearPlayerMarkers();
       return;
     }
+
+    const clusteredUserIds = new Set<string>();
+    const clusterEngine = new ClusterEngine(playerClusterMarkersRef.current);
+
+    const getSelfLngLat = (): [number, number] | null => {
+      if (selfMarkerRef.current) {
+        const position = selfMarkerRef.current.marker.getLngLat();
+        return [position.lng, position.lat];
+      }
+      const location = userLocationRef.current;
+      return location.latitude != null && location.longitude != null
+        ? [location.longitude, location.latitude]
+        : null;
+    };
 
     const zoomCluster = (
       members: UserProfile[],
@@ -1443,77 +1387,64 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     ) => {
       animatePlayerClusterExpand(entry, () => {
         setNavMode("FREE");
-        isProgrammaticRef.current = true;
-        fitMapToClusterMembers(
-          map,
+        syncMapPadding();
+        cameraRef.current.fitClusterMembers(
           members,
+          toLngLat,
           PRESENCE_CROSSFADE_END - 0.01,
-          CLUSTER_ZOOM_MS,
         );
-        window.setTimeout(() => {
-          isProgrammaticRef.current = false;
-        }, CLUSTER_ZOOM_MS + 50);
       });
     };
 
-    const syncPlayerPresence = () => {
+    const buildClusterFrame = (allowRemoval: boolean) => {
       const zoom = map.getZoom();
       const opacities = presenceZoom.update(zoom);
-      const radius = presenceZoom.getClusterRadius();
-      const groups = clusterPlayersOnScreen(map, onlineUsers, radius);
+      const radius = getClusterMergeRadiusForZoom(zoom, presenceZoom);
+      return {
+        map,
+        users: onlineUsers,
+        mergeRadiusPx: radius,
+        opacities,
+        zoom,
+        selfLngLat: getSelfLngLat(),
+        previewAvatars: clusterPreviewAvatars,
+        allowClusterRemoval: allowRemoval,
+        toLngLat,
+        onClusterTap: zoomCluster,
+      };
+    };
 
-      const visibleAvatars: UserProfile[] = [];
-      const nextClusterKeys = new Set<string>();
-
-      for (const group of groups) {
-        if (group.type === "cluster") {
-          nextClusterKeys.add(group.key);
-        } else {
-          visibleAvatars.push(group.user);
-        }
+    const applyPresenceOpacities = () => {
+      const zoom = map.getZoom();
+      const opacities = presenceZoom.update(zoom);
+      applyPlayerPresenceOpacity(
+        playerMarkersRef.current,
+        zoom,
+        opacities,
+        clusteredUserIds,
+        presenceZoom,
+      );
+      syncMountedPlayerMarkerViewport(map, playerMarkersRef.current);
+      updatePlayerClusterMarkersZoom(playerClusterMarkersRef.current, zoom);
+      for (const entry of playerMarkersRef.current) {
+        applyPlayerMarkerZIndex(entry.marker, false);
       }
-
-      for (const group of groups) {
-        if (group.type !== "cluster") continue;
-
-        const clusterProps = {
-          count: group.count,
-          rarity: group.rarity,
-          previewAvatars: clusterPreviewAvatars(group.members),
-        };
-        const existing = playerClusterMarkersRef.current[group.key];
-        if (existing) {
-          updatePlayerClusterMarker(existing, clusterProps, group.coords);
-          continue;
-        }
-
-        const entry = mountPlayerClusterMarker(
-          map,
-          group.key,
-          group.coords,
-          clusterProps,
-          () => zoomCluster(group.members, entry),
-          opacities,
-        );
-        playerClusterMarkersRef.current[group.key] = entry;
+      if (selfMarkerRef.current) {
+        applyPlayerMarkerZIndex(selfMarkerRef.current.marker, true);
       }
+    };
 
-      for (const [key, entry] of Object.entries(playerClusterMarkersRef.current)) {
-        if (!nextClusterKeys.has(key)) {
-          unmountPlayerClusterMarker(entry);
-          delete playerClusterMarkersRef.current[key];
-        }
-      }
-
-      updatePlayerClusterMarkersZoom(playerClusterMarkersRef.current, opacities);
-
+    /** Mount every online player once — positions update on pan; never unmount on zoom. */
+    const syncAvatarMarkers = () => {
+      const zoom = map.getZoom();
+      const opacities = presenceZoom.update(zoom);
       const byUserId = new Map(
         playerMarkersRef.current
           .filter((e) => e.userId)
           .map((e) => [e.userId!, e] as const),
       );
 
-      for (const user of visibleAvatars) {
+      for (const user of onlineUsers) {
         const coords = toLngLat(user.location);
         const existing = byUserId.get(user.id);
         if (existing) {
@@ -1522,45 +1453,65 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           byUserId.delete(user.id);
           continue;
         }
-        const entry = mountPlayerMarker(
-          map,
-          coords,
-          userToMarkerProps(user),
-          { userId: user.id, onTap: () => onPlayerTapRef.current(user) },
-          opacities,
+        playerMarkersRef.current.push(
+          mountPlayerMarker(
+            map,
+            coords,
+            userToMarkerProps(user),
+            { userId: user.id, onTap: () => onPlayerTapRef.current(user) },
+            opacities,
+          ),
         );
-        playerMarkersRef.current.push(entry);
       }
 
       for (const stale of byUserId.values()) {
         unmountPlayerMarker(stale);
         playerMarkersRef.current = playerMarkersRef.current.filter((e) => e !== stale);
       }
-
-      refreshPlayerMarkersOnZoom(playerMarkersRef.current, zoom, opacities);
-      return opacities;
     };
 
-    const applyZoomOpacities = () => {
+    /** Stable cluster engine — mount-once ids, hysteresis, animated merge/split. */
+    const syncClusterMarkers = (opts: { allowRemoval?: boolean; throttle?: boolean } = {}) => {
+      const allowRemoval = opts.allowRemoval === true;
+      const frame = buildClusterFrame(allowRemoval);
+
+      clusteredUserIds.clear();
+      if (opts.throttle !== false) {
+        clusterEngine.scheduleFrame(frame);
+        return;
+      }
+      const nextIds = clusterEngine.runFrame(frame);
+      for (const id of nextIds) clusteredUserIds.add(id);
+    };
+
+    levelBadgeGate.reset(map.getZoom());
+    let lastPresenceMode = presenceZoom.getDisplayMode();
+    let lastExpandT = getClusterExpandT(map.getZoom());
+
+    const onZoom = () => {
       const zoom = map.getZoom();
-      const opacities = presenceZoom.update(zoom);
-      refreshPlayerMarkersOnZoom(playerMarkersRef.current, zoom, opacities);
-      updatePlayerClusterMarkersZoom(playerClusterMarkersRef.current, opacities);
-      return opacities;
+      presenceZoom.update(zoom);
+      const mode = presenceZoom.getDisplayMode();
+      const expandT = getClusterExpandT(zoom);
+
+      if (mode !== lastPresenceMode) {
+        syncClusterMarkers({ allowRemoval: false, throttle: false });
+        lastPresenceMode = mode;
+      }
+
+      if (lastExpandT > 0.001 && expandT <= 0.001) {
+        syncClusterMarkers({ allowRemoval: false, throttle: false });
+      } else if (lastExpandT <= 0.001 && expandT > 0.001) {
+        syncClusterMarkers({ allowRemoval: false, throttle: false });
+      } else {
+        syncClusterMarkers({ allowRemoval: false, throttle: true });
+      }
+      lastExpandT = expandT;
+
+      applyPresenceOpacities();
     };
 
     let lastPanCenter = map.getCenter();
-    let lastClusterRadius = presenceZoom.getClusterRadius();
-
-    const onZoom = () => {
-      applyZoomOpacities();
-    };
-
-    const onZoomEnd = () => {
-      const radius = presenceZoom.getClusterRadius();
-      if (radius !== lastClusterRadius) lastClusterRadius = radius;
-      syncPlayerPresence();
-    };
 
     const onMoveEnd = () => {
       const center = map.getCenter();
@@ -1569,60 +1520,80 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         Math.abs(center.lat - lastPanCenter.lat) > 1e-5;
       if (panChanged) {
         lastPanCenter = center;
+        syncAvatarMarkers();
         if (presenceZoom.shouldSyncClustersOnPan(map.getZoom())) {
-          syncPlayerPresence();
-          return;
+          syncClusterMarkers({ allowRemoval: true, throttle: false });
+        } else if (getClusterExpandT(map.getZoom()) > 0.001) {
+          syncClusterMarkers({ allowRemoval: false, throttle: false });
         }
       }
-      applyZoomOpacities();
+      applyPresenceOpacities();
     };
 
     if (import.meta.env.DEV) {
       console.info(
-        "[STREETGRID] Custom player clusters: screen-space overlap, 48px, " +
-          "count (2–9) / stack+count (10+), tap → fitBounds 250ms. No Mapbox cluster layers.",
+        "[STREETGRID] Cluster engine v5 — stable ids, hysteresis, 220ms transitions.",
       );
     }
 
-    syncPlayerPresence();
-    lastClusterRadius = presenceZoom.getClusterRadius();
+    syncAvatarMarkers();
+    syncClusterMarkers({ throttle: false });
+    applyPresenceOpacities();
+    syncMountedPlayerMarkerViewport(map, playerMarkersRef.current);
 
     map.on("moveend", onMoveEnd);
     map.on("zoom", onZoom);
-    map.on("zoomend", onZoomEnd);
 
     playerRenderCleanupRef.current = () => {
       map.off("moveend", onMoveEnd);
       map.off("zoom", onZoom);
-      map.off("zoomend", onZoomEnd);
+      clusterEngine.reset();
+      resetSharedClusterTransitionController();
+      resetSharedPlayerMarkerAppearanceController();
       clearPlayerMarkers();
     };
 
     return () => playerRenderCleanupRef.current?.();
-  }, [layers.users, ready, city]);
+  }, [layers.users, ready, city, demoRoadPositions]);
 
-  // ── Current user marker (always visible, distinct styling) ───────────────────
+  // ── Current user marker — mount once, then move in place ────────────────────
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !ready) return;
+    const location = userLocationRef.current;
+    if (
+      !map ||
+      !ready ||
+      location.latitude == null ||
+      location.longitude == null ||
+      selfMarkerRef.current
+    ) {
+      return;
+    }
 
-    const coords: [number, number] = userCoords
-      ? [userCoords.lng, userCoords.lat]
-      : toLngLat(carPositionRef.current);
     const props = selfToMarkerProps(
       profile.handle,
       profile.rarity,
       getPlayerLevel(vehicleProgress),
       getVehicleById(selectedCarId)?.color ?? getVehicleColorForSeed("me"),
     );
-
-    selfMarkerRef.current = mountPlayerMarker(map, coords, props);
+    selfMarkerRef.current = mountPlayerMarker(
+      map,
+      [location.longitude, location.latitude],
+      props,
+    );
+    applyPlayerMarkerZIndex(selfMarkerRef.current.marker, true);
 
     const onZoom = () => {
       if (!selfMarkerRef.current) return;
       const zoom = map.getZoom();
-      const opacities = getSharedPlayerPresenceZoomState().update(zoom);
-      refreshPlayerMarkersOnZoom([selfMarkerRef.current], zoom, opacities);
+      const presence = getSharedPlayerPresenceZoomState();
+      applyPlayerPresenceOpacity(
+        [selfMarkerRef.current],
+        zoom,
+        presence.update(zoom),
+        new Set<string>(),
+        presence,
+      );
     };
     map.on("zoom", onZoom);
     onZoom();
@@ -1634,18 +1605,24 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         selfMarkerRef.current = null;
       }
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- position synced in effect below
-  }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- marker props update below
+  }, [ready, hasUserDisplayPosition]);
 
   useEffect(() => {
     const map = mapRef.current;
     const entry = selfMarkerRef.current;
-    if (!map || !ready || !entry) return;
+    if (
+      !map ||
+      !ready ||
+      !entry ||
+      userLocation.latitude == null ||
+      userLocation.longitude == null
+    ) {
+      return;
+    }
 
-    const coords: [number, number] = userCoords
-      ? [userCoords.lng, userCoords.lat]
-      : toLngLat(carPositionRef.current);
-    entry.marker.setLngLat(coords);
+    entry.marker.setLngLat([userLocation.longitude, userLocation.latitude]);
+    applyPlayerMarkerZIndex(entry.marker, true);
     const zoom = map.getZoom();
     const opacities = getSharedPlayerPresenceZoomState().update(zoom);
     updatePlayerMarkerProps(
@@ -1659,7 +1636,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       zoom,
       opacities,
     );
-  }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId, userCoords?.lat, userCoords?.lng]);
+  }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId, userLocation]);
 
   // ── Feature markers (meets) ───────────────────────────────────────────────────
   useEffect(() => {
@@ -1738,14 +1715,19 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
           if (seen.has(key)) continue;
           seen.add(key);
           const el = makeClusterEl(Number(props.point_count));
+          tagMapMarkerLayer(el, MAP_MARKER_LAYER.poi);
           el.addEventListener("click", (e) => {
             e.stopPropagation();
             source.getClusterExpansionZoom(clusterId, (err, zoom) => {
               if (err || zoom == null) return;
               setNavMode("FREE");
-              isProgrammaticRef.current = true;
-              map.easeTo({ center: coords, zoom: zoom + 0.5, duration: 600 });
-              isProgrammaticRef.current = false;
+              syncMapPadding();
+              const currentZoom = map.getZoom();
+              const targetZoom = Math.min(zoom + 0.35, currentZoom + 0.65);
+              cameraRef.current.easeTo({
+                center: coords,
+                zoom: targetZoom,
+              });
             });
           });
           spotMarkersRef.current[key] = new mapboxgl.Marker({ element: el }).setLngLat(coords).addTo(map);
@@ -1821,16 +1803,27 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       zoom,
       getSharedPlayerPresenceZoomState().update(zoom),
     );
+    syncMountedPlayerMarkerViewport(map, botMarkersRef.current);
 
     const onZoom = () => {
       const z = map.getZoom();
-      const opacities = getSharedPlayerPresenceZoomState().update(z);
-      refreshPlayerMarkersOnZoom(botMarkersRef.current, z, opacities);
+      const presence = getSharedPlayerPresenceZoomState();
+      const opacities = presence.update(z);
+      applyPlayerPresenceOpacity(
+        botMarkersRef.current,
+        z,
+        opacities,
+        new Set<string>(),
+        presence,
+      );
+      syncMountedPlayerMarkerViewport(map, botMarkersRef.current);
     };
     map.on("zoom", onZoom);
+    map.on("moveend", onZoom);
 
     return () => {
       map.off("zoom", onZoom);
+      map.off("moveend", onZoom);
       unmountAllPlayerMarkers(botMarkersRef.current);
       botMarkersRef.current = [];
     };
@@ -1863,15 +1856,15 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const target = [...SPOTS, ...userSpots].find((s) => s.id === focusSpot.id);
     if (!target) return;
     setNavMode("FREE");
-    isProgrammaticRef.current = true;
-    mapRef.current?.flyTo({
-      center: toLngLat(target.coords), zoom: WAZE_ZOOM,
-      pitch: WAZE_PITCH, bearing: headingRef.current,
-      duration: 1600, essential: true,
+    syncMapPadding();
+    cameraRef.current.flyTo({
+      center: toLngLat(target.coords),
+      zoom: WAZE_ZOOM,
+      pitch: WAZE_PITCH,
+      bearing: headingRef.current,
     });
-    isProgrammaticRef.current = false;
-    setTimeout(() => setSelectedSpot(target), 1200);
-  }, [focusSpot, ready, userSpots]);
+    setTimeout(() => setSelectedSpot(target), CAMERA_DURATION_MAX_MS);
+  }, [focusSpot, ready, userSpots, syncMapPadding]);
 
   // ── External route request ─────────────────────────────────────────────────
   useEffect(() => {
@@ -1879,41 +1872,26 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     runRouteTo(routeRequest.coords, routeRequest.name);
   }, [routeRequest, ready, runRouteTo]);
 
-  // ── GPS nav button ─────────────────────────────────────────────────────────────
-  // Cycles FREE → FOLLOW → DRIVE → FREE.
-  // Each step immediately moves the camera so the user sees a response before
-  // the next GPS tick arrives; subsequent ticks are handled by the reactive effect.
+  // ── Current-location button ──────────────────────────────────────────────────
   const cycleNavMode = () => {
     const map = mapRef.current;
     if (!map) return;
-    const [lat, lng] = carPositionRef.current;
 
-    if (navMode === "FREE") {
-      // FREE → FOLLOW: recentre on car; keep user's pitch & bearing.
-      setNavMode("FOLLOW");
-      isProgrammaticRef.current = true;
-      map.easeTo({ center: [lng, lat], duration: 800, essential: true });
-      isProgrammaticRef.current = false;
-
-    } else if (navMode === "FOLLOW") {
-      // FOLLOW → DRIVE: full Waze — pitch 65, heading bearing, lower-third padding.
-      setNavMode("DRIVE");
-      isProgrammaticRef.current = true;
-      map.flyTo({
-        center:    [lng, lat],
-        zoom:      18.0,
-        pitch:     65,
-        bearing:   headingRef.current,
-        padding:   WAZE_PADDING,
-        duration:  1500,
-        essential: true,
-      });
-      isProgrammaticRef.current = false;
-
-    } else {
-      // DRIVE → FREE: release camera; user is free to pan.
+    const centerOnLocation = (location: UserLocationFix) => {
+      navModeRef.current = "FREE";
       setNavMode("FREE");
-    }
+      cameraRef.current.syncPadding({ navMode: "FREE" });
+      cameraRef.current.flyTo({
+        center: [location.longitude, location.latitude],
+        zoom: Math.min(18, Math.max(map.getZoom(), 16.5)),
+        pitch: map.getPitch(),
+        bearing: location.heading ?? map.getBearing(),
+        force: true,
+      });
+    };
+
+    const knownLocation = getValidLocationFix(userLocationRef.current);
+    if (knownLocation) centerOnLocation(knownLocation);
   };
 
   // ── SOS submit ────────────────────────────────────────────────────────────────
@@ -1926,13 +1904,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     setSignals((s) => [...s, sig]);
     setNavMode("FREE");
     setTimeout(() => {
-      isProgrammaticRef.current = true;
-      mapRef.current?.flyTo({
-        center: toLngLat(coords), zoom: WAZE_ZOOM,
-        pitch: WAZE_PITCH, bearing: headingRef.current,
-        duration: 1200, essential: true,
+      if (!mapRef.current) return;
+      syncMapPadding();
+      cameraRef.current.flyTo({
+        center: toLngLat(coords),
+        zoom: WAZE_ZOOM,
+        pitch: WAZE_PITCH,
+        bearing: headingRef.current,
       });
-      isProgrammaticRef.current = false;
     }, 100);
     const targetCity = city === "all" ? "tallinn" : city;
     pushChat({
@@ -1961,37 +1940,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
   // ─── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div className="relative sg-map-wrap h-full">
-      <div ref={containerRef} className="sg-map h-full w-full" />
-
-      {/* ── GPS status badge — non-blocking, top-center ──────────────────────────
-           GPS is an enhancement; map is always visible regardless of GPS state.
-           Priority: denied > approximate > (nothing when precise GPS active)      */}
-      {gpsStatus === "denied" ? (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[700]">
-          <div className="flex items-center gap-2 rounded-full bg-red-500/15 border border-red-500/30 px-3 py-1 backdrop-blur-sm">
-            <span className="h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" />
-            <span className="text-[10px] font-semibold text-red-300 tracking-wide whitespace-nowrap">
-              GPS unavailable
-            </span>
-            <button
-              onClick={() => setGpsAttempt((n) => n + 1)}
-              className="ml-0.5 text-[9px] font-bold text-red-300/80 hover:text-red-200 transition"
-            >
-              Retry
-            </button>
-          </div>
-        </div>
-      ) : userCoords && !isPreciseLocation ? (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[700] pointer-events-none">
-          <div className="flex items-center gap-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 px-3 py-1 backdrop-blur-sm">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <span className="text-[10px] font-semibold text-amber-300 tracking-wide whitespace-nowrap">
-              Approximate location
-            </span>
-          </div>
-        </div>
-      ) : null}
+    <div className="sg-map-wrap">
+      <div ref={containerRef} className="sg-map" />
 
       {/* ── Navigation overlay ── */}
       {activeRoute && (
@@ -2019,70 +1969,32 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         </div>
       )}
 
-      {/* ── Top-right controls ── */}
-      <div className="absolute top-3 right-3 z-[600] flex flex-col gap-1.5">
+      {/* ── Top-right controls removed — map FABs limited to compass · SOS · add ── */}
+
+      {/* ── Bottom-right action stack — compass · SOS ── */}
+      <MapActionStack
+        navMode={navMode}
+        onNavClick={cycleNavMode}
+        buildingsVisible={showBuildings}
+        onBuildingsClick={() => setShowBuildings((visible) => !visible)}
+        sosOpen={sosOpen}
+        onSosClick={() => setSosOpen(true)}
+      />
+
+      <button
+        type="button"
+        onClick={() => setAddOpen(true)}
+        aria-label="Добавить спот"
+        className="sg-map-fab sg-map-fab--add"
+      >
+        <Plus className="sg-map-fab__add-icon" strokeWidth={2.5} />
+      </button>
+
+      <div className="sg-map-search-track">
         <button
-          onClick={() => setLayers((l) => ({ ...l, users: !l.users }))}
-          title="Слои"
-          className={`h-9 w-9 grid place-items-center rounded-xl glass-strong transition ${
-            layers.users ? "text-accent/90" : "text-muted-foreground/40"
-          }`}
-        >
-          <Layers className="h-4 w-4" />
-        </button>
-        {/* Buildings toggle */}
-        <div className="flex flex-col items-center gap-[3px]">
-          <button
-            onClick={() => setShowBuildings((v) => !v)}
-            title={showBuildings ? "Скрыть здания" : "Показать здания"}
-            className={`h-9 w-9 grid place-items-center rounded-xl transition
-              ${showBuildings
-                ? "bg-accent/15 glass-strong text-accent ring-1 ring-accent/30"
-                : "glass-strong text-muted-foreground/40 hover:text-accent/60"
-              }`}
-          >
-            <Building className="h-4 w-4" />
-          </button>
-          <span className={`text-[7px] font-black tracking-widest leading-none
-            ${showBuildings ? "text-accent/70" : "text-muted-foreground/40"}`}>
-            {showBuildings ? "ON" : "OFF"}
-          </span>
-        </div>
-      </div>
-
-      {/* ── Bottom action bar ── */}
-      <div className="absolute bottom-[58px] left-0 right-0 z-[600] flex flex-col gap-1.5 px-4 pointer-events-none">
-        {/* Row 1 – Add · Geo · SOS */}
-        <div className="flex items-end justify-between pointer-events-auto">
-          <button
-            onClick={() => setAddOpen(true)}
-            aria-label="Добавить спот"
-            className="h-12 w-12 shrink-0 rounded-full bg-accent grid place-items-center glow-cyan active:scale-95 transition shadow-lg"
-          >
-            <Plus className="h-5 w-5 text-accent-foreground" />
-          </button>
-
-          <div className="sg-map-controls flex items-end gap-3">
-            <NavModeButton mode={navMode} onClick={cycleNavMode} />
-
-            <div className="shrink-0 flex flex-col items-center gap-0.5">
-              <button
-                onClick={() => setSosOpen(true)}
-                aria-label="SOS"
-                aria-pressed={sosOpen}
-                className={`sg-sos-btn h-12 w-12 rounded-full bg-gradient-to-br from-primary to-red-800 grid place-items-center active:scale-95${sosOpen ? " sg-sos-btn--active" : ""}`}
-              >
-                <Siren className="h-5 w-5 text-white" />
-              </button>
-              <span className="text-[9px] font-bold tracking-widest text-primary/70 leading-none">SOS</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Row 2 – Search */}
-        <button
+          type="button"
           onClick={() => setSearchOpen(true)}
-          className="w-full glass-strong rounded-full px-4 py-2.5 flex items-center gap-3 active:opacity-80 transition border border-white/10 shadow-lg pointer-events-auto"
+          className="sg-map-search"
         >
           <Search className="h-4 w-4 text-muted-foreground shrink-0" />
           <span className="text-sm text-muted-foreground flex-1 text-left">Куда едем?</span>
@@ -2127,13 +2039,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                         setSearchOpen(false);
                         setSelectedSpot(spot);
                         setNavMode("FREE");
-                        isProgrammaticRef.current = true;
-                        mapRef.current?.flyTo({
-                          center: toLngLat(spot.coords), zoom: WAZE_ZOOM,
-                          pitch: WAZE_PITCH, bearing: headingRef.current,
-                          duration: 1600, essential: true,
+                        syncMapPadding();
+                        cameraRef.current.flyTo({
+                          center: toLngLat(spot.coords),
+                          zoom: WAZE_ZOOM,
+                          pitch: WAZE_PITCH,
+                          bearing: headingRef.current,
                         });
-                        isProgrammaticRef.current = false;
                       }}
                     >
                       <span className="text-xl shrink-0">{spot.icon}</span>
@@ -2165,13 +2077,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
                       onClick={() => {
                         setSearchOpen(false);
                         setNavMode("FREE");
-                        isProgrammaticRef.current = true;
-                        mapRef.current?.flyTo({
-                          center: toLngLat(mt.coords), zoom: WAZE_ZOOM,
-                          pitch: WAZE_PITCH, bearing: headingRef.current,
-                          duration: 1600, essential: true,
+                        syncMapPadding();
+                        cameraRef.current.flyTo({
+                          center: toLngLat(mt.coords),
+                          zoom: WAZE_ZOOM,
+                          pitch: WAZE_PITCH,
+                          bearing: headingRef.current,
                         });
-                        isProgrammaticRef.current = false;
                       }}
                     >
                       <span className="text-xl shrink-0">{mt.cover}</span>
@@ -2192,7 +2104,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         </div>
       )}
 
-      <SosModal open={sosOpen} fallbackCoords={ME.location} onClose={() => setSosOpen(false)} onSubmit={handleSosSubmit} />
+      <SosModal open={sosOpen} fallbackCoords={myLocation ?? ME.location} onClose={() => setSosOpen(false)} onSubmit={handleSosSubmit} />
       <SpotDetailPanel
         spot={selectedSpot}
         onClose={() => setSelectedSpot(null)}

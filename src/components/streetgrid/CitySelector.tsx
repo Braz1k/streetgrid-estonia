@@ -1,38 +1,47 @@
 import { CITIES, type CityId } from "@/lib/streetgrid/data";
-import { MapPin } from "lucide-react";
-import { cn } from "@/lib/utils";
 
 type Props = {
   value: CityId;
   onChange: (id: CityId) => void;
 };
 
-export function CitySelector({ value, onChange }: Props) {
+function cityLabel(id: CityId, name: string, short: string) {
+  if (id === "all") {
+    return <span>ЭСТОНИЯ</span>;
+  }
 
   return (
-    <div className="sticky top-[var(--sg-header-height)] z-40 glass-strong border-b border-white/5">
-      <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1 overflow-x-auto no-scrollbar">
-        <MapPin className="h-3 w-3 text-primary shrink-0" />
+    <>
+      <span className="sg-city__btn-code">{short}</span>
+      <span>{name.toUpperCase()}</span>
+    </>
+  );
+}
+
+export function CitySelector({ value, onChange }: Props) {
+  return (
+    <div
+      className="sg-city city-tabs-row"
+      role="toolbar"
+      aria-label="City selector"
+      style={{ position: "relative", zIndex: 2, background: "#0a0a14" }}
+    >
+      <div className="sg-city__track">
         {CITIES.map((c) => {
           const active = c.id === value;
           return (
             <button
               key={c.id}
+              type="button"
               onClick={() => onChange(c.id)}
-              className={cn(
-                "shrink-0 h-7 px-2.5 rounded-md text-[9px] font-bold tracking-wide transition flex items-center gap-1",
-                active
-                  ? "bg-primary text-primary-foreground glow-red"
-                  : "glass text-muted-foreground hover:text-foreground",
-              )}
+              className={`sg-city__btn${active ? " sg-city__btn--active" : ""}`}
+              aria-pressed={active}
             >
-              <span className="text-[8px] opacity-70">{c.short}</span>
-              <span className="whitespace-nowrap">{c.name.toUpperCase()}</span>
+              {cityLabel(c.id, c.name, c.short)}
             </button>
           );
         })}
       </div>
-
     </div>
   );
 }

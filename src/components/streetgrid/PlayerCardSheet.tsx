@@ -8,6 +8,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import type { CSSProperties } from "react";
 import type { UserProfile } from "@/lib/streetgrid/data";
 import { getPlayerAvatarUrl } from "@/lib/streetgrid/avatars";
 import {
@@ -16,6 +17,7 @@ import {
   getRankProgressPercent,
 } from "@/lib/streetgrid/reputation";
 import { RARITY_META } from "@/lib/streetgrid/vehicles";
+import { getRarityRingCssProperties } from "@/lib/streetgrid/markerRendering";
 
 export type PlayerCardSheetProps = {
   user: UserProfile | null;
@@ -81,11 +83,11 @@ export function PlayerCardSheet({
 
         <div className="sg-player-card__hero">
           <div
-            className="sg-player-card__avatar-ring"
+            className="sg-player-card__avatar-ring sg-rarity-ring sg-rarity-ring--card"
             style={{
+              ...getRarityRingCssProperties(user.rarity),
               borderColor: rarity.color,
-              boxShadow: `0 0 32px ${rarity.color}40, inset 0 0 24px ${rarity.color}10`,
-            }}
+            } as CSSProperties}
           >
             <img src={avatar} alt="" className="sg-player-card__avatar" draggable={false} />
             {online && <span className="sg-player-card__online" title="Online" />}

@@ -1,3 +1,5 @@
+import { RARITY_META, type VehicleRarity } from "./vehicles";
+
 export type SpotRarity = "common" | "rare" | "epic" | "legendary";
 
 export type SpotReward = {
@@ -21,42 +23,28 @@ export type Spot = {
 
 export const SPOT_RARITY_ORDER: SpotRarity[] = ["common", "rare", "epic", "legendary"];
 
-export const SPOT_RARITY_VISUAL: Record<
-  SpotRarity,
-  { label: string; color: string; glow: string; pulse: boolean }
-> = {
-  common: {
-    label: "COMMON",
-    color: "#00f0ff",
-    glow: "0 0 14px rgba(0,240,255,0.65),0 0 32px rgba(0,240,255,0.32),inset 0 0 8px rgba(0,240,255,0.12)",
-    pulse: false,
-  },
-  rare: {
-    label: "RARE",
-    color: "#3399ff",
-    glow: "0 0 14px rgba(51,153,255,0.7),0 0 34px rgba(51,153,255,0.35),inset 0 0 8px rgba(51,153,255,0.12)",
-    pulse: true,
-  },
-  epic: {
-    label: "EPIC",
-    color: "#bb44ff",
-    glow: "0 0 16px rgba(187,68,255,0.75),0 0 38px rgba(187,68,255,0.38),inset 0 0 10px rgba(187,68,255,0.14)",
-    pulse: true,
-  },
-  legendary: {
-    label: "LEGENDARY",
-    color: "#ffcc33",
-    glow: "0 0 18px rgba(255,204,51,0.85),0 0 42px rgba(255,204,51,0.45),inset 0 0 12px rgba(255,204,51,0.18)",
-    pulse: true,
-  },
-};
-
+/** Spot marker presentation — colors and pulse from RARITY_META. */
 export function getSpotRarityVisual(rarity: SpotRarity) {
-  return SPOT_RARITY_VISUAL[rarity];
+  const meta = RARITY_META[rarity];
+  return {
+    label: meta.label.toUpperCase(),
+    color: meta.color,
+    pulse: meta.pulse,
+  };
+}
+
+/** @deprecated Use getSpotRarityVisual — kept for legacy imports. */
+export const SPOT_RARITY_VISUAL = Object.fromEntries(
+  SPOT_RARITY_ORDER.map((r) => [r, getSpotRarityVisual(r)]),
+) as Record<SpotRarity, ReturnType<typeof getSpotRarityVisual>>;
+
+export type { VehicleRarity as SpotRarityVehicleMap };
+
+export function spotRarityAsVehicle(rarity: SpotRarity): VehicleRarity {
+  return rarity;
 }
 
 export const SPOTS: Spot[] = [
-  // ── Tallinn ──────────────────────────────────────────────────────────────────
   {
     id: "s1", city: "tallinn", name: "Patarei Sea Fortress", rarity: "rare",
     coords: [59.452, 24.738],
@@ -121,7 +109,6 @@ export const SPOTS: Spot[] = [
     reward: { xp: 95, label: "Old Town Frames" },
     owner: "@stance_lord", participants: 4,
   },
-  // ── Tartu ────────────────────────────────────────────────────────────────────
   {
     id: "s9", city: "tartu", name: "Lõunakeskus Parking", rarity: "common",
     coords: [58.358, 26.692],
@@ -138,7 +125,6 @@ export const SPOTS: Spot[] = [
     reward: { xp: 280, label: "Runway Sprint" },
     owner: "STREETGRID", participants: 7,
   },
-  // ── Pärnu ────────────────────────────────────────────────────────────────────
   {
     id: "s11", city: "parnu", name: "Rannaparkla", rarity: "rare",
     coords: [58.378, 24.494],

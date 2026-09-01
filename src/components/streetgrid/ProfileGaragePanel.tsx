@@ -5,6 +5,7 @@ import { getRankFromProgress } from "@/lib/streetgrid/reputation";
 import { RARITY_META } from "@/lib/streetgrid/vehicles";
 import { ReputationBadge } from "./ReputationBadge";
 import { ReputationPanel } from "./ReputationPanel";
+import { getPlayerAvatarUrl } from "@/lib/streetgrid/avatars";
 import { Gauge, Calendar, Wrench, Camera, Edit3 } from "lucide-react";
 import { GarageEditModal } from "./GarageEditModal";
 
@@ -16,8 +17,9 @@ export function ProfileGaragePanel({ viewUserId, onBack }: Props) {
   const otherUser = viewUserId ? USERS.find((u) => u.id === viewUserId) : null;
   const isMe = !otherUser;
   const handle = isMe ? profile.handle : otherUser!.handle;
-  const avatar = isMe ? profile.avatar : otherUser!.avatar;
-  const status = isMe ? profile.status : otherUser!.status === "moving" ? "В движении" : "На споте";
+  const avatarUrl = isMe
+    ? getPlayerAvatarUrl({ id: "me", handle: profile.handle })
+    : getPlayerAvatarUrl(otherUser!);
   const car = isMe ? profile.car : otherUser!.car;
   const reputation = isMe ? getEffectiveReputation() : otherUser!.reputation;
   const rank = getRankFromProgress(reputation);
@@ -35,16 +37,21 @@ export function ProfileGaragePanel({ viewUserId, onBack }: Props) {
             ← НАЗАД
           </button>
         )}
-        <div className="absolute bottom-3 right-3 glass-strong rounded-full px-3 py-1.5 text-[10px] font-bold tracking-widest text-nitro border border-nitro/40">
-          ● {String(status).toUpperCase()}
+        <div className="absolute bottom-3 right-3 glass-strong rounded-full px-3 py-1.5 text-[10px] font-bold tracking-widest text-accent border border-accent/40">
+          {otherUser ? (otherUser.status === "moving" ? "В движении" : "На споте") : "Профиль"}
         </div>
       </div>
 
       <div className="px-4 -mt-8 relative z-10 space-y-4">
         <div className="glass-strong rounded-2xl p-4">
           <div className="flex items-center gap-3 mb-3">
-            <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-primary to-primary/30 grid place-items-center font-display font-black text-lg">
-              {avatar}
+            <div className="h-14 w-14 rounded-2xl overflow-hidden border-2 border-accent/40 shrink-0">
+              <img
+                src={avatarUrl}
+                alt=""
+                className="h-full w-full object-cover"
+                draggable={false}
+              />
             </div>
             <div className="flex-1 min-w-0">
               <div className="font-display font-black text-lg truncate">{handle}</div>

@@ -1,30 +1,30 @@
-import { Navigation } from "lucide-react";
+import { cn } from "@/lib/utils";
 import type { NavMode } from "@/lib/streetgrid/navMode";
-import { NAV_MODE_ARIA } from "@/lib/streetgrid/navMode";
 
 type Props = {
-  mode:    NavMode;
+  mode: NavMode;
   onClick: () => void;
+  className?: string;
 };
 
-/** Circular GPS nav — sized to align with SOS (48px). */
-export function NavModeButton({ mode, onClick }: Props) {
-  const label = NAV_MODE_ARIA[mode];
-
+/** Location / compass — 52px rounded-square cyan glass FAB. */
+export function NavModeButton({
+  mode,
+  onClick,
+  className,
+}: Props) {
   return (
     <button
       type="button"
       onClick={onClick}
       data-nav={mode}
-      aria-label={label}
-      title={label}
-      className="sg-nav-btn shrink-0 grid place-items-center rounded-full border-2 backdrop-blur-md active:scale-95 h-12 w-12"
+      aria-label="Center on your location"
+      title="Center on your location"
+      className={cn("sg-map-fab sg-map-fab--compass", className)}
     >
-      <Navigation
-        className="sg-nav-icon h-5 w-5"
-        style={mode !== "FREE" ? { fill: "currentColor" } : undefined}
-        strokeWidth={mode === "FREE" ? 1.85 : 2.25}
-      />
+      <span className="sg-map-fab__compass-icon" aria-hidden>
+        ➤
+      </span>
     </button>
   );
 }

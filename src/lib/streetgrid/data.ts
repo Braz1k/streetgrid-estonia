@@ -15,11 +15,11 @@ export type City = {
 };
 
 export const CITIES: City[] = [
-  { id: "all", name: "Вся Эстония", short: "EST", coords: [58.8, 25.5], zoom: 7.2 },
-  { id: "tallinn", name: "Таллинн", short: "TLN", coords: [59.437, 24.7536], zoom: 11.8 },
-  { id: "tartu", name: "Тарту", short: "TRT", coords: [58.378, 26.729], zoom: 11.8 },
-  { id: "parnu", name: "Пярну", short: "PNU", coords: [58.385, 24.497], zoom: 11.8 },
-  { id: "narva", name: "Нарва", short: "NRV", coords: [59.379, 28.196], zoom: 11.8 },
+  { id: "all", name: "Эстония", short: "EST", coords: [58.5953, 25.0136], zoom: 7 },
+  { id: "tallinn", name: "Таллинн", short: "TLN", coords: [59.4370, 24.7536], zoom: 13 },
+  { id: "tartu", name: "Тарту", short: "TRT", coords: [58.3780, 26.7290], zoom: 13 },
+  { id: "parnu", name: "Пярну", short: "PNU", coords: [58.3859, 24.5004], zoom: 13 },
+  { id: "narva", name: "Нарва", short: "NRV", coords: [59.3797, 28.1790], zoom: 13 },
 ];
 
 export const getCity = (id: CityId) => CITIES.find((c) => c.id === id) ?? CITIES[0];
@@ -295,7 +295,20 @@ export const ROUTES: Route[] = [
 export type { Spot, SpotRarity, SpotReward } from "./spots";
 export { SPOTS, SPOT_RARITY_ORDER, SPOT_RARITY_VISUAL, getSpotRarityVisual } from "./spots";
 export type { VehicleRarity, Rarity } from "./vehicles";
-export { RARITY_META, RARITY_ORDER, getMarkerRarityStyles, getHighestVehicleRarity } from "./vehicles";
+export { RARITY_META, RARITY_ORDER, RARITY_COLORS, getHighestVehicleRarity, normalizeVehicleRarity } from "./vehicles";
+export {
+  applyRarityRingVars,
+  buildRarityShadow,
+  getMarkerRarityStyles,
+  getRarityAnimationClass,
+  getRarityBoxShadow,
+  getRarityGlowSpec,
+  getRarityRingClass,
+  getRarityRingCssProperties,
+  getRarityRingCssVars,
+  getRarityUiBorder,
+} from "./rarityRendering";
+export type { RarityAnimation, RarityGlowSpec } from "./rarityRendering";
 export type { RankId, ReputationProgress, RankDefinition } from "./reputation";
 export {
   RANKS, REPUTATION_WEIGHTS, DEFAULT_REPUTATION,
