@@ -246,9 +246,8 @@
   z-index: 3;
   opacity: var(--presence-opacity, 0);
   --sg-player-avatar-t: 1;
-  contain: layout style;
+  contain: style;
   will-change: opacity;
-  backface-visibility: hidden;
 }
 
 .sg-player-marker-mount--self { z-index: 10; }
@@ -261,15 +260,14 @@
 .sg-player-marker-mount__stage {
   transform: translateZ(0) scale(var(--sg-marker-zoom-scale, 1));
   transform-origin: center bottom;
+  overflow: visible;
   will-change: transform;
-  backface-visibility: hidden;
   transition: transform 80ms linear;
 }
 
 .sg-player-marker-mount__visual {
   transform-origin: center bottom;
-  will-change: transform, opacity;
-  backface-visibility: hidden;
+  overflow: visible;
 }
 
 /* Other players — compact rarity point ↔ avatar via --sg-player-avatar-t (0–1). YOU never uses this. */
@@ -333,6 +331,7 @@
   align-items: center;
   pointer-events: auto;
   cursor: pointer;
+  overflow: visible;
   --sg-marker-photo: 35px;
   --sg-marker-ring: 2px;
   --sg-marker-gap: 1.25px;
@@ -434,7 +433,7 @@
   border: var(--sg-marker-online-border, 1.25px) solid var(--sg-marker-online-border-color, #0a0e14);
   box-shadow: var(--sg-marker-online-glow, 0 0 4px rgba(40, 216, 91, 0.3));
   z-index: 4;
-  transform: none;
+  transform: translateZ(0);
   flex-shrink: 0;
 }
 
@@ -519,6 +518,8 @@
   font-variant-numeric: tabular-nums;
   color: #0a0a0a;
   text-align: center;
+  transform: translateZ(0);
+  -webkit-font-smoothing: antialiased;
 }
 
 .sg-marker-badge--level-wide .sg-marker-badge__level-num {

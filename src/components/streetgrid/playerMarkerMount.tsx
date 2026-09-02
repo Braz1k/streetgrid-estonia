@@ -20,7 +20,7 @@ import { MAP_MARKER_LAYER, tagMapMarkerLayer } from "@/lib/streetgrid/mapMarkerL
 let markerOpacityCounter = 0;
 
 const PLAYER_MARKER_MIN_SCALE = 0.46;
-const PLAYER_MARKER_MAX_SCALE = 1.04;
+const PLAYER_MARKER_MAX_SCALE = 1;
 const SELF_MARKER_MIN_SCALE = 0.68;
 const MARKER_SCALE_MIN_ZOOM = 7;
 const MARKER_SCALE_MAX_ZOOM = 17;
