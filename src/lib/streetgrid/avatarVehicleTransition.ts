@@ -235,6 +235,28 @@ export const HYST_LEVEL_BADGE_HIDE_MAX = 14.6;
 export const HYST_AVATAR_SHOW_MIN = 14.2;
 export const HYST_AVATAR_HIDE_MAX = 13.8;
 
+/** Other players: compact point when zoomed out, full avatar after expand. */
+export const PLAYER_POINT_ZOOM_MAX = ZOOM_CLUSTER_ONLY_MAX;
+export const PLAYER_POINT_TO_AVATAR_START = CLUSTER_EXPAND_START;
+export const PLAYER_POINT_TO_AVATAR_END = HYST_AVATAR_MODE_MIN;
+
+/** 1 = compact point, 0 = full avatar. Current-user markers must ignore this. */
+export function getOtherPlayerPointT(zoom: number): number {
+  if (zoom <= PLAYER_POINT_ZOOM_MAX) return 1;
+  if (zoom >= PLAYER_POINT_TO_AVATAR_END) return 0;
+  if (zoom < PLAYER_POINT_TO_AVATAR_START) return 1;
+  const t =
+    (zoom - PLAYER_POINT_TO_AVATAR_START) /
+    (PLAYER_POINT_TO_AVATAR_END - PLAYER_POINT_TO_AVATAR_START);
+  const s = t * t * (3 - 2 * t);
+  return 1 - s;
+}
+
+/** 0 = compact point, 1 = full avatar. Inverse of getOtherPlayerPointT. */
+export function getOtherPlayerAvatarT(zoom: number): number {
+  return 1 - getOtherPlayerPointT(zoom);
+}
+
 export function showsPlayerLevel(zoom: number): boolean {
   return zoom >= ZOOM_LEVEL_BADGE_MIN;
 }

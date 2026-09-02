@@ -20,10 +20,7 @@ import {
   getSharedPlayerPresenceZoomState,
   PlayerPresenceZoomState,
   setSharedPlayerPresenceZoomState,
-  PRESENCE_CROSSFADE_END,
   presenceDisplayLerpFactor,
-  getClusterExpandT,
-  getClusterMergeRadiusForZoom,
 } from "@/lib/streetgrid/avatarVehicleTransition";
 import { levelBadgeGate } from "@/lib/streetgrid/markerPresenceAnimator";
 import { useStreetGrid } from "@/lib/streetgrid/store";
@@ -41,18 +38,6 @@ import { AddSpotModal } from "./AddSpotModal";
 import { SpotDetailPanel } from "./SpotDetailPanel";
 import { getPlayerAvatarUrl } from "@/lib/streetgrid/avatars";
 import type { PlayerMarkerProps } from "./playerMarkerUtils";
-import {
-  animatePlayerClusterExpand,
-  unmountAllPlayerClusterMarkers,
-  updatePlayerClusterMarkersZoom,
-  type MountedPlayerCluster,
-} from "./playerClusterMount";
-import {
-  ClusterEngine,
-} from "@/lib/streetgrid/clusterEngine";
-import {
-  resetSharedClusterTransitionController,
-} from "@/lib/streetgrid/clusterTransitionController";
 import {
   resetSharedPlayerMarkerAppearanceController,
 } from "@/lib/streetgrid/playerMarkerAppearance";
@@ -133,13 +118,6 @@ const MARKER_THEMES: Record<MarkerRole, { border: string; glow: string; pulse: b
   legend:       { border: "#ffdd33", glow: "0 0 16px rgba(255,221,51,0.8),0 0 40px rgba(255,221,51,0.42),inset 0 0 10px rgba(255,221,51,0.15)", pulse: false },
   sos:          { border: "#ff0033", glow: "0 0 8px rgba(255,0,51,0.45),0 0 22px rgba(255,0,51,0.24)", pulse: true  },
 };
-
-function clusterPreviewAvatars(members: UserProfile[]): string[] {
-  return [...members]
-    .sort((a, b) => getRarityRank(b.rarity) - getRarityRank(a.rarity))
-    .slice(0, 3)
-    .map((u) => getPlayerAvatarUrl(u));
-}
 
 function distKm(a: [number, number], b: [number, number]): number {
   const [lat1, lng1] = a;
@@ -856,7 +834,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const cameraRef            = useRef(new MapCameraController());
   const featureMarkersRef    = useRef<mapboxgl.Marker[]>([]);
   const playerMarkersRef     = useRef<MountedPlayerMarker[]>([]);
-  const playerClusterMarkersRef = useRef<Record<string, MountedPlayerCluster>>({});
   const playerRenderCleanupRef  = useRef<(() => void) | null>(null);
   const selfMarkerRef        = useRef<MountedPlayerMarker | null>(null);
   const spotMarkersRef       = useRef<Record<string, mapboxgl.Marker>>({});
@@ -1066,7 +1043,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       map.addSource("players", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
-        // Custom React clusters only — no Mapbox cluster layers.
+        // Individual HTML player markers — no Mapbox player clustering.
         cluster: false,
       });
 
@@ -1333,7 +1310,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const selectedPlayerDistance = selectedPlayer && myLocation
     ? distKm(myLocation, selectedPlayer.location)
     : null;
-  // ── Live players: mount once, opacity on zoom, sync clusters on pan ───────────
+  // ── Live players: mount once, compact/avatar on zoom, positions on pan ────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -1358,8 +1335,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const clearPlayerMarkers = () => {
       unmountAllPlayerMarkers(playerMarkersRef.current);
       playerMarkersRef.current = [];
-      unmountAllPlayerClusterMarkers(playerClusterMarkersRef.current);
-      playerClusterMarkersRef.current = {};
     };
 
     if (!layers.users) {
@@ -1367,65 +1342,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       return;
     }
 
-    const clusteredUserIds = new Set<string>();
-    const clusterEngine = new ClusterEngine(playerClusterMarkersRef.current);
-
-    const getSelfLngLat = (): [number, number] | null => {
-      if (selfMarkerRef.current) {
-        const position = selfMarkerRef.current.marker.getLngLat();
-        return [position.lng, position.lat];
-      }
-      const location = userLocationRef.current;
-      return location.latitude != null && location.longitude != null
-        ? [location.longitude, location.latitude]
-        : null;
-    };
-
-    const zoomCluster = (
-      members: UserProfile[],
-      entry: MountedPlayerCluster,
-    ) => {
-      animatePlayerClusterExpand(entry, () => {
-        setNavMode("FREE");
-        syncMapPadding();
-        cameraRef.current.fitClusterMembers(
-          members,
-          toLngLat,
-          PRESENCE_CROSSFADE_END - 0.01,
-        );
-      });
-    };
-
-    const buildClusterFrame = (allowRemoval: boolean) => {
-      const zoom = map.getZoom();
-      const opacities = presenceZoom.update(zoom);
-      const radius = getClusterMergeRadiusForZoom(zoom, presenceZoom);
-      return {
-        map,
-        users: onlineUsers,
-        mergeRadiusPx: radius,
-        opacities,
-        zoom,
-        selfLngLat: getSelfLngLat(),
-        previewAvatars: clusterPreviewAvatars,
-        allowClusterRemoval: allowRemoval,
-        toLngLat,
-        onClusterTap: zoomCluster,
-      };
-    };
-
     const applyPresenceOpacities = () => {
       const zoom = map.getZoom();
       const opacities = presenceZoom.update(zoom);
-      applyPlayerPresenceOpacity(
-        playerMarkersRef.current,
-        zoom,
-        opacities,
-        clusteredUserIds,
-        presenceZoom,
-      );
+      applyPlayerPresenceOpacity(playerMarkersRef.current, zoom, opacities);
       syncMountedPlayerMarkerViewport(map, playerMarkersRef.current);
-      updatePlayerClusterMarkersZoom(playerClusterMarkersRef.current, zoom);
       for (const entry of playerMarkersRef.current) {
         applyPlayerMarkerZIndex(entry.marker, false);
       }
@@ -1470,44 +1391,10 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       }
     };
 
-    /** Stable cluster engine — mount-once ids, hysteresis, animated merge/split. */
-    const syncClusterMarkers = (opts: { allowRemoval?: boolean; throttle?: boolean } = {}) => {
-      const allowRemoval = opts.allowRemoval === true;
-      const frame = buildClusterFrame(allowRemoval);
-
-      clusteredUserIds.clear();
-      if (opts.throttle !== false) {
-        clusterEngine.scheduleFrame(frame);
-        return;
-      }
-      const nextIds = clusterEngine.runFrame(frame);
-      for (const id of nextIds) clusteredUserIds.add(id);
-    };
-
     levelBadgeGate.reset(map.getZoom());
-    let lastPresenceMode = presenceZoom.getDisplayMode();
-    let lastExpandT = getClusterExpandT(map.getZoom());
 
     const onZoom = () => {
-      const zoom = map.getZoom();
-      presenceZoom.update(zoom);
-      const mode = presenceZoom.getDisplayMode();
-      const expandT = getClusterExpandT(zoom);
-
-      if (mode !== lastPresenceMode) {
-        syncClusterMarkers({ allowRemoval: false, throttle: false });
-        lastPresenceMode = mode;
-      }
-
-      if (lastExpandT > 0.001 && expandT <= 0.001) {
-        syncClusterMarkers({ allowRemoval: false, throttle: false });
-      } else if (lastExpandT <= 0.001 && expandT > 0.001) {
-        syncClusterMarkers({ allowRemoval: false, throttle: false });
-      } else {
-        syncClusterMarkers({ allowRemoval: false, throttle: true });
-      }
-      lastExpandT = expandT;
-
+      presenceZoom.update(map.getZoom());
       applyPresenceOpacities();
     };
 
@@ -1521,23 +1408,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       if (panChanged) {
         lastPanCenter = center;
         syncAvatarMarkers();
-        if (presenceZoom.shouldSyncClustersOnPan(map.getZoom())) {
-          syncClusterMarkers({ allowRemoval: true, throttle: false });
-        } else if (getClusterExpandT(map.getZoom()) > 0.001) {
-          syncClusterMarkers({ allowRemoval: false, throttle: false });
-        }
       }
       applyPresenceOpacities();
     };
 
-    if (import.meta.env.DEV) {
-      console.info(
-        "[STREETGRID] Cluster engine v5 — stable ids, hysteresis, 220ms transitions.",
-      );
-    }
-
     syncAvatarMarkers();
-    syncClusterMarkers({ throttle: false });
     applyPresenceOpacities();
     syncMountedPlayerMarkerViewport(map, playerMarkersRef.current);
 
@@ -1547,8 +1422,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     playerRenderCleanupRef.current = () => {
       map.off("moveend", onMoveEnd);
       map.off("zoom", onZoom);
-      clusterEngine.reset();
-      resetSharedClusterTransitionController();
       resetSharedPlayerMarkerAppearanceController();
       clearPlayerMarkers();
     };
@@ -1591,8 +1464,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         [selfMarkerRef.current],
         zoom,
         presence.update(zoom),
-        new Set<string>(),
-        presence,
       );
     };
     map.on("zoom", onZoom);
@@ -1813,8 +1684,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         botMarkersRef.current,
         z,
         opacities,
-        new Set<string>(),
-        presence,
       );
       syncMountedPlayerMarkerViewport(map, botMarkersRef.current);
     };

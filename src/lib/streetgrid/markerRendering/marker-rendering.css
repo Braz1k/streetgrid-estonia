@@ -245,6 +245,7 @@
   position: relative;
   z-index: 3;
   opacity: var(--presence-opacity, 0);
+  --sg-player-avatar-t: 1;
   contain: layout style;
   will-change: opacity;
   backface-visibility: hidden;
@@ -269,6 +270,59 @@
   transform-origin: center bottom;
   will-change: transform, opacity;
   backface-visibility: hidden;
+}
+
+/* Other players — compact rarity point ↔ avatar via --sg-player-avatar-t (0–1). YOU never uses this. */
+.sg-player-marker-mount--tappable:not(.sg-player-marker-mount--self) {
+  min-width: 0;
+  min-height: 0;
+}
+
+.sg-player-marker-mount--tappable:not(.sg-player-marker-mount--self)::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 44px;
+  height: 44px;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker-ring__inner {
+  position: relative;
+}
+
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker-ring__inner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--rarity-border, #00e5ff);
+  opacity: calc(1 - var(--sg-player-avatar-t, 1));
+  pointer-events: none;
+  z-index: 0;
+}
+
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker__photo {
+  position: relative;
+  z-index: 1;
+  opacity: clamp(0, calc((var(--sg-player-avatar-t, 1) - 0.28) / 0.45), 1);
+}
+
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker__glow {
+  opacity: clamp(0, calc((var(--sg-player-avatar-t, 1) - 0.2) / 0.6), 1);
+}
+
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker-badge--online,
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker-badge--friend {
+  opacity: clamp(0, calc((var(--sg-player-avatar-t, 1) - 0.55) / 0.35), 1);
+}
+
+.sg-player-marker-mount:not(.sg-player-marker-mount--self) .sg-marker__frame > .sg-marker-ring {
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, calc(0.28 * var(--sg-player-avatar-t, 1))),
+    0 0 0 1px rgba(8, 10, 18, calc(0.72 * (1 - var(--sg-player-avatar-t, 1))));
 }
 
 /* ── Player marker — ring · avatar · badges ───────────────────────────────── */

@@ -3,9 +3,8 @@ import mapboxgl from "mapbox-gl";
 import { PlayerMarker } from "./playerMarker/PlayerMarker";
 import type { PlayerMarkerProps } from "./playerMarkerUtils";
 import {
-  getClusterIndividualRevealT,
+  getOtherPlayerAvatarT,
   type PresenceOpacities,
-  type PlayerPresenceZoomState,
 } from "@/lib/streetgrid/avatarVehicleTransition";
 import {
   getSharedPlayerMarkerAppearanceController,
@@ -24,6 +23,8 @@ const PLAYER_MARKER_MAX_SCALE = 1.04;
 const SELF_MARKER_MIN_SCALE = 0.68;
 const MARKER_SCALE_MIN_ZOOM = 7;
 const MARKER_SCALE_MAX_ZOOM = 17;
+/** Compact disc size relative to the 50px avatar frame (42 + 2×(2.5+1.5)). */
+const COMPACT_POINT_SCALE = 8 / 50;
 
 export type MountedPlayerMarker = {
   marker: mapboxgl.Marker;
@@ -35,6 +36,7 @@ export type MountedPlayerMarker = {
   userId?: string;
   painted: boolean;
   lastShowLevel?: boolean;
+  lastAvatarT?: number;
   appearanceId: string;
   isUnmounting: boolean;
   finalized?: boolean;
@@ -83,12 +85,30 @@ export function getPlayerMarkerZoomScale(zoom: number, isSelf = false): number {
   );
   const smooth = normalized * normalized * (3 - 2 * normalized);
   const minimum = isSelf ? SELF_MARKER_MIN_SCALE : PLAYER_MARKER_MIN_SCALE;
-  return minimum + (PLAYER_MARKER_MAX_SCALE - minimum) * smooth;
+  const avatarScale = minimum + (PLAYER_MARKER_MAX_SCALE - minimum) * smooth;
+  if (isSelf) return avatarScale;
+
+  const avatarT = getOtherPlayerAvatarT(zoom);
+  return COMPACT_POINT_SCALE + (avatarScale - COMPACT_POINT_SCALE) * avatarT;
 }
 
 function updateMarkerZoomScale(entry: MountedPlayerMarker, zoom: number) {
-  const scale = getPlayerMarkerZoomScale(zoom, entry.props.isCurrentUser === true);
+  const isSelf = entry.props.isCurrentUser === true;
+  const scale = getPlayerMarkerZoomScale(zoom, isSelf);
   entry.stage.style.setProperty("--sg-marker-zoom-scale", scale.toFixed(4));
+
+  if (isSelf) {
+    if (entry.lastAvatarT !== 1) {
+      entry.lastAvatarT = 1;
+      entry.container.style.setProperty("--sg-player-avatar-t", "1");
+    }
+    return;
+  }
+
+  const avatarT = Number(getOtherPlayerAvatarT(zoom).toFixed(4));
+  if (entry.lastAvatarT === avatarT) return;
+  entry.lastAvatarT = avatarT;
+  entry.container.style.setProperty("--sg-player-avatar-t", String(avatarT));
 }
 
 /** Viewport + zoom opacity — transition engine drives opacity/transform only. */
@@ -96,28 +116,13 @@ export function applyPlayerPresenceOpacity(
   entries: MountedPlayerMarker[],
   zoom: number,
   opacities: PresenceOpacities,
-  _clusteredUserIds: ReadonlySet<string>,
-  _presence: PlayerPresenceZoomState,
 ) {
   const appearance = getSharedPlayerMarkerAppearanceController();
-  const revealT = getClusterIndividualRevealT(zoom);
 
   for (const entry of entries) {
     updateLevelBadgeVisibility(entry, zoom);
     updateMarkerZoomScale(entry, zoom);
-    const id = appearanceTargetId(entry);
-
-    if (entry.props.isCurrentUser) {
-      appearance.setZoomOpacity(id, opacities.avatar);
-      continue;
-    }
-
-    if (entry.userId) {
-      appearance.setZoomOpacity(id, opacities.avatar * revealT);
-      continue;
-    }
-
-    appearance.setZoomOpacity(id, opacities.avatar * revealT);
+    appearance.setZoomOpacity(appearanceTargetId(entry), opacities.avatar);
   }
 }
 

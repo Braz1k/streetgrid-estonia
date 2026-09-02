@@ -1261,7 +1261,7 @@
   transform-origin: center center;
   position: relative;
   z-index: 1;
-  opacity: var(--presence-opacity, 1);
+  opacity: var(--presence-opacity, 0);
 }
 
 .sg-player-cluster-mount__stage {

@@ -205,6 +205,7 @@ export class ClusterTransitionController {
     state.animFrom = current;
     state.animTo = target;
     state.hiddenFired = false;
+    if (target >= 0.5) state.onHidden.length = 0;
     this.ensureRunning();
   }
 

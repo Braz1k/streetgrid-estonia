@@ -51,6 +51,7 @@ export class ClusterEngine {
   private lastSnapshotKey = "";
   private clusterExpandOff = false;
   private pendingClusterReform = false;
+  private dissolving = new Set<ClusterId>();
   private rafPending = false;
   private pendingFrame: ClusterEngineFrame | null = null;
 
@@ -67,6 +68,7 @@ export class ClusterEngine {
     this.lastSnapshotKey = "";
     this.clusterExpandOff = false;
     this.pendingClusterReform = false;
+    this.dissolving.clear();
     this.rafPending = false;
     this.pendingFrame = null;
   }
@@ -114,12 +116,16 @@ export class ClusterEngine {
   private applyZoomOnly(frame: ClusterEngineFrame, snapshot: ClusterEngineSnapshot) {
     const clusterOp = getClusterDisplayOpacity(frame.opacities);
     const revealT = getClusterIndividualRevealT(frame.zoom);
+    const liveIds = new Set(snapshot.clusters.map((cluster) => cluster.id));
     for (const cluster of snapshot.clusters) {
       if (this.shouldSkipCluster(frame, cluster)) continue;
       const entry = this.mounts[cluster.id];
       if (!entry) continue;
       updatePlayerClusterMarker(entry, this.propsFor(cluster, frame), cluster.coords, frame.zoom);
       this.transitions.setClusterZoomOpacity(cluster.id, clusterOp);
+    }
+    for (const clusterId of Object.keys(this.mounts)) {
+      if (!liveIds.has(clusterId)) this.dissolveClusterMount(clusterId);
     }
     this.syncPlayerZoom(frame, snapshot.clusteredUserIds, revealT);
   }
@@ -161,7 +167,9 @@ export class ClusterEngine {
         });
         this.transitions.setClusterZoomOpacity(cluster.id, clusterOp);
 
-        if (reform) {
+        // Live again (hysteresis merge or leaving cluster-off band) — reverse fade, cancel unmount.
+        if (reform || this.dissolving.has(cluster.id)) {
+          this.dissolving.delete(cluster.id);
           this.transitions.formCluster(cluster.id, cluster.memberIds);
           continue;
         }
@@ -184,7 +192,7 @@ export class ClusterEngine {
     }
 
     for (const clusterId of snapshot.removedClusterIds) {
-      this.dissolveClusterMount(clusterId, frame.allowClusterRemoval);
+      this.dissolveClusterMount(clusterId);
     }
 
     for (const userId of snapshot.splitUserIds) {
@@ -209,12 +217,8 @@ export class ClusterEngine {
       this.pendingClusterReform = true;
       this.lastSnapshotKey = "";
       for (const clusterId of Object.keys(this.mounts)) {
-        this.dissolveClusterMount(clusterId, frame.allowClusterRemoval);
+        this.dissolveClusterMount(clusterId);
       }
-    }
-
-    for (const entry of Object.values(this.mounts)) {
-      this.transitions.setClusterZoomOpacity(entry.key, 0);
     }
 
     for (const user of frame.users) {
@@ -227,17 +231,19 @@ export class ClusterEngine {
     return new Set();
   }
 
-  private dissolveClusterMount(clusterId: ClusterId, allowRemoval: boolean) {
+  private dissolveClusterMount(clusterId: ClusterId) {
     const entry = this.mounts[clusterId];
-    if (!entry) return;
+    if (!entry || this.dissolving.has(clusterId)) return;
 
+    this.dissolving.add(clusterId);
     const members = this.memberCache.get(clusterId) ?? [];
     this.memberCache.delete(clusterId);
     this.transitions.dissolveCluster(clusterId, members);
 
-    if (!allowRemoval) return;
-
     this.transitions.whenClusterHidden(clusterId, () => {
+      this.dissolving.delete(clusterId);
+      if (this.mounts[clusterId] !== entry) return;
+      if (this.memberCache.has(clusterId)) return;
       unmountPlayerClusterMarker(entry);
       delete this.mounts[clusterId];
       this.transitions.unregisterCluster(clusterId);
