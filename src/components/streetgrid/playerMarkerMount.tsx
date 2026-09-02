@@ -13,6 +13,7 @@ import {
   PLAYER_TRANSITION_MS,
 } from "@/lib/streetgrid/playerTransitionEngine";
 import { PLAYER_MARKER_Z, SELF_MARKER_Z } from "@/lib/streetgrid/playerCluster";
+import { MARKER_FRAME_PX, MARKER_STYLE } from "@/lib/streetgrid/markerRendering/constants";
 import { levelBadgeGate } from "@/lib/streetgrid/markerPresenceAnimator";
 import { MAP_MARKER_LAYER, tagMapMarkerLayer } from "@/lib/streetgrid/mapMarkerLayers";
 
@@ -23,8 +24,8 @@ const PLAYER_MARKER_MAX_SCALE = 1.04;
 const SELF_MARKER_MIN_SCALE = 0.68;
 const MARKER_SCALE_MIN_ZOOM = 7;
 const MARKER_SCALE_MAX_ZOOM = 17;
-/** Compact disc size relative to the 50px avatar frame (42 + 2×(2.5+1.5)). */
-const COMPACT_POINT_SCALE = 8 / 50;
+/** Compact disc stays 8px; scale is relative to the current avatar frame. */
+const COMPACT_POINT_SCALE = 8 / MARKER_FRAME_PX;
 
 export type MountedPlayerMarker = {
   marker: mapboxgl.Marker;
@@ -86,7 +87,7 @@ export function getPlayerMarkerZoomScale(zoom: number, isSelf = false): number {
   const smooth = normalized * normalized * (3 - 2 * normalized);
   const minimum = isSelf ? SELF_MARKER_MIN_SCALE : PLAYER_MARKER_MIN_SCALE;
   const avatarScale = minimum + (PLAYER_MARKER_MAX_SCALE - minimum) * smooth;
-  if (isSelf) return avatarScale;
+  if (isSelf) return avatarScale * MARKER_STYLE.selfScale;
 
   const avatarT = getOtherPlayerAvatarT(zoom);
   return COMPACT_POINT_SCALE + (avatarScale - COMPACT_POINT_SCALE) * avatarT;

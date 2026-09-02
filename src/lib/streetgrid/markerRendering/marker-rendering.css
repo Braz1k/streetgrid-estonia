@@ -63,8 +63,8 @@
 /* ── Player frame — glow → ring → avatar → badges ─────────────────────────── */
 .sg-marker__frame {
   position: relative;
-  width: var(--sg-marker-avatar, 50px);
-  height: var(--sg-marker-avatar, 50px);
+  width: var(--sg-marker-avatar, 42px);
+  height: var(--sg-marker-avatar, 42px);
   flex-shrink: 0;
   overflow: visible;
 }
@@ -101,7 +101,7 @@
   box-sizing: border-box;
   border-radius: 50%;
   overflow: visible;
-  border: var(--rarity-ring-width, var(--sg-marker-ring, 2.5px)) solid var(--rarity-border);
+  border: var(--rarity-ring-width, var(--sg-marker-ring, 2px)) solid var(--rarity-border);
   background: transparent;
   box-shadow: var(--sg-player-ring-shadow, 0 1px 3px rgba(0, 0, 0, 0.28));
 }
@@ -333,13 +333,13 @@
   align-items: center;
   pointer-events: auto;
   cursor: pointer;
-  --sg-marker-photo: 42px;
-  --sg-marker-ring: 2.5px;
-  --sg-marker-gap: 1.5px;
+  --sg-marker-photo: 35px;
+  --sg-marker-ring: 2px;
+  --sg-marker-gap: 1.25px;
   --sg-marker-avatar: calc(var(--sg-marker-photo) + 2 * (var(--sg-marker-ring) + var(--sg-marker-gap)));
-  --sg-marker-glow-inset: -5px;
-  --sg-marker-online-size: 8px;
-  --sg-marker-online-border: 1.5px;
+  --sg-marker-glow-inset: -4px;
+  --sg-marker-online-size: 7px;
+  --sg-marker-online-border: 1.25px;
   --sg-marker-online-color: #28D85B;
   --sg-marker-online-border-color: #0a0e14;
   --sg-marker-online-highlight: rgba(255, 255, 255, 0.48);
@@ -348,18 +348,18 @@
 }
 
 .sg-marker--self {
-  --sg-pin-you-gap: 8px;
+  --sg-pin-you-gap: 7px;
   padding-top: var(--sg-pin-you-gap);
   padding-bottom: 2px;
 }
 
 .sg-marker .sg-marker__frame {
-  --rarity-ring-width: var(--sg-marker-ring, 2.5px);
+  --rarity-ring-width: var(--sg-marker-ring, 2px);
 }
 
 .sg-marker__photo {
-  width: var(--sg-marker-photo, 42px);
-  height: var(--sg-marker-photo, 42px);
+  width: var(--sg-marker-photo, 35px);
+  height: var(--sg-marker-photo, 35px);
   border-radius: 50%;
   object-fit: cover;
   object-position: center center;
@@ -380,7 +380,7 @@
 
 .sg-marker-badge--you {
   position: absolute;
-  top: calc(-1 * var(--sg-pin-you-gap, 8px) + 1px);
+  top: calc(-1 * var(--sg-pin-you-gap, 7px) + 1px);
   left: 50%;
   transform: translateX(-50%);
   padding: 1px 4px;
@@ -400,10 +400,12 @@
 }
 
 .sg-marker--self .sg-marker-badge--you {
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 3px;
   border: 0.5px solid rgba(255, 220, 120, 0.52);
   background: linear-gradient(180deg, #fff8e0 0%, #ffcc00 46%, #c99400 100%);
+  font-size: 6px;
+  letter-spacing: 0.12em;
   box-shadow:
     0 1px 3px rgba(0, 0, 0, 0.34),
     0 0 5px rgba(255, 204, 0, 0.26),
@@ -419,8 +421,8 @@
   position: absolute;
   right: 0;
   bottom: 0;
-  width: var(--sg-marker-online-size, 8px);
-  height: var(--sg-marker-online-size, 8px);
+  width: var(--sg-marker-online-size, 7px);
+  height: var(--sg-marker-online-size, 7px);
   border-radius: 50%;
   box-sizing: border-box;
   background-color: var(--sg-marker-online-color, #28D85B);
@@ -429,7 +431,7 @@
     var(--sg-marker-online-highlight, rgba(255, 255, 255, 0.48)) 0%,
     transparent 55%
   );
-  border: var(--sg-marker-online-border, 1.5px) solid var(--sg-marker-online-border-color, #0a0e14);
+  border: var(--sg-marker-online-border, 1.25px) solid var(--sg-marker-online-border-color, #0a0e14);
   box-shadow: var(--sg-marker-online-glow, 0 0 4px rgba(40, 216, 91, 0.3));
   z-index: 4;
   transform: none;
@@ -440,8 +442,8 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 11px;
-  height: 11px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -460,10 +462,13 @@
   position: absolute;
   left: -5px;
   bottom: -5px;
-  transform: none;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
   width: 14px;
-  height: 17px;
-  z-index: 5;
+  height: 16px;
+  z-index: 8;
+  overflow: visible;
   opacity: 0;
   visibility: hidden;
   transition:
@@ -477,32 +482,47 @@
 }
 
 .sg-marker-badge__level-hex {
-  position: absolute;
-  inset: 0;
+  grid-area: 1 / 1;
   width: 100%;
   height: 100%;
+  display: block;
+  overflow: visible;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.sg-marker-badge__level-hex path {
   fill: #ffcc00;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+  stroke: #0a0e14;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
 }
 
 .sg-marker-badge__level-num {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding-bottom: 2px;
+  grid-area: 1 / 1;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
   font-family: var(--font-display, system-ui);
-  font-size: 7px;
-  font-weight: 900;
+  font-size: 8px;
+  font-weight: 800;
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
   font-variant-numeric: tabular-nums;
-  color: #ffffff;
+  color: #0a0a0a;
+  text-align: center;
 }
 
 .sg-marker-badge--level-wide .sg-marker-badge__level-num {
-  font-size: 6px;
-  letter-spacing: -0.06em;
+  font-size: 7px;
 }
 
 /* Future badge slots */

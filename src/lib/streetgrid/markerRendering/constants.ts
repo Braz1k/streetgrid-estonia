@@ -2,27 +2,27 @@
  * Central marker design tokens — single source for all map presence markers.
  */
 
-/** Layout + ring geometry (player markers) — compact V2 (~20% smaller footprint). */
+/** Layout + ring geometry (player markers) — compact V2 (~17% smaller footprint). */
 export const MARKER_STYLE = {
   /** Visible avatar photo diameter. */
-  avatarPx: 42,
-  /** @deprecated Self uses identical geometry — kept for compat. */
-  selfScale: 1,
-  ringPx: 2.5,
+  avatarPx: 35,
+  /** Self marker footprint vs other players — applied through existing zoom scale. */
+  selfScale: 0.91,
+  ringPx: 2,
   /** @deprecated Self uses identical ring — kept for compat. */
-  selfRingPx: 2.5,
-  gapPx: 1.5,
-  glowRadiusPx: 5,
-  glowInsetPx: -5,
+  selfRingPx: 2,
+  gapPx: 1.25,
+  glowRadiusPx: 4,
+  glowInsetPx: -4,
   /** @deprecated Self uses identical glow — kept for compat. */
-  selfGlowInsetPx: -5,
-  outerInsetPx: -5,
+  selfGlowInsetPx: -4,
+  outerInsetPx: -4,
   /** @deprecated Self uses identical outer glow — kept for compat. */
-  selfOuterInsetPx: -5,
+  selfOuterInsetPx: -4,
   dropShadow: "0 2px 6px rgba(0,0,0,.35)",
   fill: "#080a12",
   photoScale: 1,
-  pinYouGapPx: 8,
+  pinYouGapPx: 7,
   defaultOnlineOffsetPct: 28,
   selfOnlineOffsetPct: 28,
   cardRingPx: 2.5,
@@ -123,8 +123,8 @@ export const SELF_GLOW = {
 
 /** Online presence dot — identical on every marker, no animation. */
 export const ONLINE_BADGE = {
-  sizePx: 8,
-  borderPx: 1.5,
+  sizePx: 7,
+  borderPx: 1.25,
   color: "#28D85B",
   borderColor: "#0a0e14",
   highlight: "rgba(255, 255, 255, 0.48)",
