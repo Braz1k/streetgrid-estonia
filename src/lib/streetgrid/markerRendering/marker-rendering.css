@@ -511,8 +511,8 @@
   padding: 0;
   overflow: visible;
   font-family: var(--font-display, system-ui);
-  font-size: 8px;
-  font-weight: 800;
+  font-size: 9px;
+  font-weight: 900;
   line-height: 1;
   letter-spacing: 0;
   font-variant-numeric: tabular-nums;
@@ -523,7 +523,7 @@
 }
 
 .sg-marker-badge--level-wide .sg-marker-badge__level-num {
-  font-size: 7px;
+  font-size: 8px;
 }
 
 /* Future badge slots */
