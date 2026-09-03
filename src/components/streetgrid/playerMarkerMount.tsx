@@ -3,29 +3,19 @@ import mapboxgl from "mapbox-gl";
 import { PlayerMarker } from "./playerMarker/PlayerMarker";
 import type { PlayerMarkerProps } from "./playerMarkerUtils";
 import {
-  getOtherPlayerAvatarT,
-  type PresenceOpacities,
-} from "@/lib/streetgrid/avatarVehicleTransition";
-import {
   getSharedPlayerMarkerAppearanceController,
   resetSharedPlayerMarkerAppearanceController,
   syncPlayerMarkerViewport,
   PLAYER_TRANSITION_MS,
 } from "@/lib/streetgrid/playerTransitionEngine";
 import { PLAYER_MARKER_Z, SELF_MARKER_Z } from "@/lib/streetgrid/playerCluster";
-import { MARKER_FRAME_PX, MARKER_STYLE } from "@/lib/streetgrid/markerRendering/constants";
-import { levelBadgeGate } from "@/lib/streetgrid/markerPresenceAnimator";
+import {
+  getPlayerMarkerRepresentation,
+  type PlayerMarkerRepresentationState,
+} from "@/lib/streetgrid/playerMarkerRepresentation";
 import { MAP_MARKER_LAYER, tagMapMarkerLayer } from "@/lib/streetgrid/mapMarkerLayers";
 
 let markerOpacityCounter = 0;
-
-const PLAYER_MARKER_MIN_SCALE = 0.46;
-const PLAYER_MARKER_MAX_SCALE = 1;
-const SELF_MARKER_MIN_SCALE = 0.68;
-const MARKER_SCALE_MIN_ZOOM = 7;
-const MARKER_SCALE_MAX_ZOOM = 17;
-/** Compact disc stays 8px; scale is relative to the current avatar frame. */
-const COMPACT_POINT_SCALE = 8 / MARKER_FRAME_PX;
 
 export type MountedPlayerMarker = {
   marker: mapboxgl.Marker;
@@ -38,6 +28,7 @@ export type MountedPlayerMarker = {
   painted: boolean;
   lastShowLevel?: boolean;
   lastAvatarT?: number;
+  lastRepresentation?: PlayerMarkerRepresentationState;
   appearanceId: string;
   isUnmounting: boolean;
   finalized?: boolean;
@@ -72,30 +63,20 @@ function renderMarkerContent(entry: MountedPlayerMarker) {
   entry.painted = true;
 }
 
-function updateLevelBadgeVisibility(entry: MountedPlayerMarker, zoom: number) {
-  const showLevel = levelBadgeGate.update(zoom) && entry.props.isCurrentUser !== true;
-  if (entry.lastShowLevel === showLevel) return;
-  entry.container.dataset.showLevel = showLevel ? "1" : "0";
-  entry.lastShowLevel = showLevel;
-}
-
-export function getPlayerMarkerZoomScale(zoom: number, isSelf = false): number {
-  const normalized = Math.max(
-    0,
-    Math.min(1, (zoom - MARKER_SCALE_MIN_ZOOM) / (MARKER_SCALE_MAX_ZOOM - MARKER_SCALE_MIN_ZOOM)),
-  );
-  const smooth = normalized * normalized * (3 - 2 * normalized);
-  const minimum = isSelf ? SELF_MARKER_MIN_SCALE : PLAYER_MARKER_MIN_SCALE;
-  const avatarScale = minimum + (PLAYER_MARKER_MAX_SCALE - minimum) * smooth;
-  if (isSelf) return avatarScale * MARKER_STYLE.selfScale;
-
-  const avatarT = getOtherPlayerAvatarT(zoom);
-  return COMPACT_POINT_SCALE + (avatarScale - COMPACT_POINT_SCALE) * avatarT;
-}
-
-function updateMarkerZoomScale(entry: MountedPlayerMarker, zoom: number) {
+function applyMarkerRepresentation(entry: MountedPlayerMarker, zoom: number) {
   const isSelf = entry.props.isCurrentUser === true;
-  const scale = getPlayerMarkerZoomScale(zoom, isSelf);
+  const { state, avatarT, scale, showLevel } = getPlayerMarkerRepresentation(zoom, isSelf);
+
+  if (entry.lastRepresentation !== state) {
+    entry.container.dataset.representation = state;
+    entry.lastRepresentation = state;
+  }
+
+  if (entry.lastShowLevel !== showLevel) {
+    entry.container.dataset.showLevel = showLevel ? "1" : "0";
+    entry.lastShowLevel = showLevel;
+  }
+
   entry.stage.style.setProperty("--sg-marker-zoom-scale", scale.toFixed(4));
 
   if (isSelf) {
@@ -106,39 +87,27 @@ function updateMarkerZoomScale(entry: MountedPlayerMarker, zoom: number) {
     return;
   }
 
-  const avatarT = Number(getOtherPlayerAvatarT(zoom).toFixed(4));
-  if (entry.lastAvatarT === avatarT) return;
-  entry.lastAvatarT = avatarT;
-  entry.container.style.setProperty("--sg-player-avatar-t", String(avatarT));
+  const nextAvatarT = Number(avatarT.toFixed(4));
+  if (entry.lastAvatarT === nextAvatarT) return;
+  entry.lastAvatarT = nextAvatarT;
+  entry.container.style.setProperty("--sg-player-avatar-t", String(nextAvatarT));
 }
 
-/** Viewport + zoom opacity — transition engine drives opacity/transform only. */
-export function applyPlayerPresenceOpacity(
-  entries: MountedPlayerMarker[],
-  zoom: number,
-  opacities: PresenceOpacities,
-) {
+/** Viewport + representation update — no opacity coupling to CarLayer fade. */
+export function applyPlayerPresenceOpacity(entries: MountedPlayerMarker[], zoom: number) {
   const appearance = getSharedPlayerMarkerAppearanceController();
 
   for (const entry of entries) {
-    updateLevelBadgeVisibility(entry, zoom);
-    updateMarkerZoomScale(entry, zoom);
-    appearance.setZoomOpacity(appearanceTargetId(entry), opacities.avatar);
+    applyMarkerRepresentation(entry, zoom);
+    appearance.setZoomOpacity(appearanceTargetId(entry), 1);
   }
 }
 
-export function applyPlayerMarkerOpacity(entry: MountedPlayerMarker, avatarOpacity: number) {
-  getSharedPlayerMarkerAppearanceController().setZoomOpacity(
-    appearanceTargetId(entry),
-    avatarOpacity,
-  );
-}
-
-function primeMarkerAppearance(entry: MountedPlayerMarker, zoomOpacity: number) {
+function primeMarkerAppearance(entry: MountedPlayerMarker) {
   renderMarkerContent(entry);
   const id = appearanceTargetId(entry);
   const engine = getSharedPlayerMarkerAppearanceController();
-  engine.setZoomFactor(id, zoomOpacity);
+  engine.setZoomFactor(id, 1);
   if (entry.props.isCurrentUser) {
     engine.enterViewport(id);
   }
@@ -157,7 +126,6 @@ export function updatePlayerMarkerProps(
   entry: MountedPlayerMarker,
   props: PlayerMarkerProps,
   zoom: number,
-  _opacities: PresenceOpacities,
 ) {
   const propsChanged =
     entry.props.avatar !== props.avatar ||
@@ -173,8 +141,7 @@ export function updatePlayerMarkerProps(
     entry.painted = false;
     renderMarkerContent(entry);
   }
-  updateLevelBadgeVisibility(entry, zoom);
-  updateMarkerZoomScale(entry, zoom);
+  applyMarkerRepresentation(entry, zoom);
 }
 
 export type MountPlayerMarkerOptions = {
@@ -188,7 +155,6 @@ export function mountPlayerMarker(
   coords: [number, number],
   props: PlayerMarkerProps,
   options?: mapboxgl.Popup | MountPlayerMarkerOptions,
-  opacities?: PresenceOpacities,
 ): MountedPlayerMarker {
   const opts: MountPlayerMarkerOptions =
     options instanceof mapboxgl.Popup ? { popup: options } : (options ?? {});
@@ -226,10 +192,8 @@ export function mountPlayerMarker(
   registerAppearance(entry);
 
   const zoom = map.getZoom();
-  const op = opacities ?? { cluster: 0, avatar: 1, vehicle: 0, mode: "avatar" as const };
-  primeMarkerAppearance(entry, op.avatar);
-  updateLevelBadgeVisibility(entry, zoom);
-  updateMarkerZoomScale(entry, zoom);
+  primeMarkerAppearance(entry);
+  applyMarkerRepresentation(entry, zoom);
 
   if (opts.onTap) {
     container.addEventListener("click", (e) => {
@@ -247,24 +211,16 @@ export function mountPlayerMarker(
   return entry;
 }
 
-export function updatePlayerMarkersZoom(
-  entries: MountedPlayerMarker[],
-  zoom: number,
-  _opacities: PresenceOpacities,
-) {
+export function updatePlayerMarkersZoom(entries: MountedPlayerMarker[], zoom: number) {
   for (const entry of entries) {
-    updateLevelBadgeVisibility(entry, zoom);
-    updateMarkerZoomScale(entry, zoom);
+    applyMarkerRepresentation(entry, zoom);
   }
 }
 
-export function applyPlayerMarkersOpacity(
-  entries: MountedPlayerMarker[],
-  opacities: PresenceOpacities,
-) {
+export function applyPlayerMarkersOpacity(entries: MountedPlayerMarker[]) {
   const appearance = getSharedPlayerMarkerAppearanceController();
   for (const entry of entries) {
-    appearance.setZoomOpacity(appearanceTargetId(entry), opacities.avatar);
+    appearance.setZoomOpacity(appearanceTargetId(entry), 1);
   }
 }
 
@@ -293,4 +249,6 @@ export function unmountAllPlayerMarkers(entries: MountedPlayerMarker[]) {
   for (const entry of entries) unmountPlayerMarker(entry);
 }
 
+export { getPlayerMarkerRepresentation };
+export { getPlayerMarkerZoomScale } from "@/lib/streetgrid/playerMarkerRepresentation";
 export { resetSharedPlayerMarkerAppearanceController };
