@@ -17,9 +17,6 @@ import {
 import { RARITY_META } from "@/lib/streetgrid/vehicles";
 import {
   getVehicleLayerOpacity,
-  getSharedPlayerPresenceZoomState,
-  PlayerPresenceZoomState,
-  setSharedPlayerPresenceZoomState,
   presenceDisplayLerpFactor,
 } from "@/lib/streetgrid/avatarVehicleTransition";
 import { levelBadgeGate } from "@/lib/streetgrid/markerPresenceAnimator";
@@ -84,6 +81,8 @@ const ROUTE_LINE = "#00f3ff";
 
 const WAZE_ZOOM    = 16.5;
 const WAZE_PITCH   = 60;
+/** Overhead route-preview framing — not the Waze driving camera. */
+const ROUTE_PREVIEW_PITCH = 0;
 
 type Props = {
   city: CityId;
@@ -107,6 +106,8 @@ const DEMO_BOT_CITIES: Record<"b1" | "b2" | "b3" | "patrol", DemoCityId> = {
 type ActiveRoute = {
   name: string; distanceKm: number; durationMin: number;
 };
+
+type RoutePhase = "preview" | "navigating";
 
 type MarkerRole = "user_regular" | "user_friend" | "club" | "party" | "legend" | "sos";
 
@@ -856,6 +857,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const onSpotSelectRef = useRef<(s: Spot) => void>(() => {});
   onSpotSelectRef.current = (s) => setSelectedSpot(s);
   const [activeRoute,   setActiveRoute]   = useState<ActiveRoute | null>(null);
+  const [routePhase,    setRoutePhase]    = useState<RoutePhase | null>(null);
   const [layers,        setLayers]        = useState({ users: true, spots: true, meets: true });
   const [bots,          setBots]          = useState<Bot[]>([]);
   const [searchOpen,    setSearchOpen]    = useState(false);
@@ -908,6 +910,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     wazePaddingRef.current = next;
     return next;
   }, [searchOpen, selectedPlayer, activeRoute, navMode]);
+  const syncMapPaddingRef = useRef(syncMapPadding);
+  syncMapPaddingRef.current = syncMapPadding;
 
   const cityObj      = getCity(city);
   const allSpots     = [...SPOTS, ...userSpots];
@@ -1144,14 +1148,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     const target = CITY_COORDS[city];
     navModeRef.current = "FREE";
     setNavMode("FREE");
-    syncMapPadding();
+    syncMapPaddingRef.current();
     cameraRef.current.flyTo({
       center: target.center,
       zoom: target.zoom,
       pitch: city === "all" ? 0 : 45,
       bearing: 0,
     });
-  }, [city, ready, syncMapPadding]);
+  }, [city, ready]);
 
   // ── Buildings visibility ──────────────────────────────────────────────────────
   // Toggles all fill-extrusion (3D building) layers in the Mapbox style.
@@ -1259,8 +1263,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     syncMapPadding();
     const bounds = coords.reduce((b, c) => b.extend(c), new mapboxgl.LngLatBounds(coords[0], coords[0]));
     cameraRef.current.fitBounds(bounds, {
-      pitch: WAZE_PITCH,
-      bearing: headingRef.current,
+      pitch: ROUTE_PREVIEW_PITCH,
+      bearing: 0,
     });
   }, [syncMapPadding]);
 
@@ -1268,7 +1272,8 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     // Routing starts from raw browser GPS; never from a demo/default position.
     const rawOrigin = getValidLocationFix(userLocationRef.current);
     if (!rawOrigin) {
-      console.error("[GPS] Cannot start route before a browser position is available");
+      setPlayerToast("Нужна GPS-позиция, чтобы начать маршрут");
+      window.setTimeout(() => setPlayerToast(null), 2400);
       return;
     }
     const [oLng, oLat] = toLngLat([rawOrigin.latitude, rawOrigin.longitude]);
@@ -1279,11 +1284,15 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       const route = json?.routes?.[0];
       if (!route) throw new Error("no route");
       setRouteGeoJson(route.geometry);
+      setNavMode("FREE");
+      setRoutePhase("preview");
       fitRouteBounds(route.geometry.coordinates);
       setActiveRoute({ name, distanceKm: route.distance / 1000, durationMin: route.duration / 60 });
     } catch {
       const geo: GeoJSON.LineString = { type: "LineString", coordinates: [[oLng, oLat], [dLng, dLat]] };
       setRouteGeoJson(geo);
+      setNavMode("FREE");
+      setRoutePhase("preview");
       fitRouteBounds(geo.coordinates as [number, number][]);
       const dx = (dLng - oLng) * 111 * Math.cos((oLat * Math.PI) / 180);
       const dy = (dLat - oLat) * 111;
@@ -1292,7 +1301,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     }
   }, [fitRouteBounds, setRouteGeoJson]);
 
-  const clearRoute   = useCallback(() => { setRouteGeoJson(null); setActiveRoute(null); }, [setRouteGeoJson]);
+  const clearRoute = useCallback(() => {
+    setRouteGeoJson(null);
+    setActiveRoute(null);
+    setRoutePhase(null);
+  }, [setRouteGeoJson]);
   const triggerRoute = useCallback((c: [number, number], n: string) => runRouteTo(c, n), [runRouteTo]);
 
   const showPlayerToast = useCallback((msg: string) => {
@@ -1304,8 +1317,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   const myLocation = validUserLocation
     ? [validUserLocation.latitude, validUserLocation.longitude] as AppCoordinate
     : null;
-  const hasUserDisplayPosition =
-    userLocation.latitude != null && userLocation.longitude != null;
+  const hasUserDisplayPosition = validUserLocation != null;
 
   const selectedPlayerDistance = selectedPlayer && myLocation
     ? distKm(myLocation, selectedPlayer.location)
@@ -1325,8 +1337,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       const roadPosition = demoRoadPositions[user.id];
       return roadPosition ? [{ ...user, location: roadPosition }] : [];
     });
-    const presenceZoom = new PlayerPresenceZoomState();
-    setSharedPlayerPresenceZoomState(presenceZoom);
 
     source.setData(
       layers.users ? playersToGeoJson(onlineUsers) : { type: "FeatureCollection", features: [] },
@@ -1344,8 +1354,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
 
     const applyPresenceOpacities = () => {
       const zoom = map.getZoom();
-      const opacities = presenceZoom.update(zoom);
-      applyPlayerPresenceOpacity(playerMarkersRef.current, zoom, opacities);
+      applyPlayerPresenceOpacity(playerMarkersRef.current, zoom);
       syncMountedPlayerMarkerViewport(map, playerMarkersRef.current);
       for (const entry of playerMarkersRef.current) {
         applyPlayerMarkerZIndex(entry.marker, false);
@@ -1358,7 +1367,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     /** Mount every online player once — positions update on pan; never unmount on zoom. */
     const syncAvatarMarkers = () => {
       const zoom = map.getZoom();
-      const opacities = presenceZoom.update(zoom);
       const byUserId = new Map(
         playerMarkersRef.current
           .filter((e) => e.userId)
@@ -1370,7 +1378,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         const existing = byUserId.get(user.id);
         if (existing) {
           existing.marker.setLngLat(coords);
-          updatePlayerMarkerProps(existing, userToMarkerProps(user), zoom, opacities);
+          updatePlayerMarkerProps(existing, userToMarkerProps(user), zoom);
           byUserId.delete(user.id);
           continue;
         }
@@ -1380,7 +1388,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
             coords,
             userToMarkerProps(user),
             { userId: user.id, onTap: () => onPlayerTapRef.current(user) },
-            opacities,
           ),
         );
       }
@@ -1394,7 +1401,6 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     levelBadgeGate.reset(map.getZoom());
 
     const onZoom = () => {
-      presenceZoom.update(map.getZoom());
       applyPresenceOpacities();
     };
 
@@ -1429,17 +1435,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     return () => playerRenderCleanupRef.current?.();
   }, [layers.users, ready, city, demoRoadPositions]);
 
-  // ── Current user marker — mount once, then move in place ────────────────────
+  // ── Current user marker — mount once after a real GPS fix, then move in place ─
   useEffect(() => {
     const map = mapRef.current;
-    const location = userLocationRef.current;
-    if (
-      !map ||
-      !ready ||
-      location.latitude == null ||
-      location.longitude == null ||
-      selfMarkerRef.current
-    ) {
+    const fix = getValidLocationFix(userLocationRef.current);
+    if (!map || !ready || !fix || selfMarkerRef.current) {
       return;
     }
 
@@ -1451,20 +1451,14 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
     );
     selfMarkerRef.current = mountPlayerMarker(
       map,
-      [location.longitude, location.latitude],
+      [fix.longitude, fix.latitude],
       props,
     );
     applyPlayerMarkerZIndex(selfMarkerRef.current.marker, true);
 
     const onZoom = () => {
       if (!selfMarkerRef.current) return;
-      const zoom = map.getZoom();
-      const presence = getSharedPlayerPresenceZoomState();
-      applyPlayerPresenceOpacity(
-        [selfMarkerRef.current],
-        zoom,
-        presence.update(zoom),
-      );
+      applyPlayerPresenceOpacity([selfMarkerRef.current], map.getZoom());
     };
     map.on("zoom", onZoom);
     onZoom();
@@ -1482,20 +1476,13 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
   useEffect(() => {
     const map = mapRef.current;
     const entry = selfMarkerRef.current;
-    if (
-      !map ||
-      !ready ||
-      !entry ||
-      userLocation.latitude == null ||
-      userLocation.longitude == null
-    ) {
+    const fix = getValidLocationFix(userLocation);
+    if (!map || !ready || !entry || !fix) {
       return;
     }
 
-    entry.marker.setLngLat([userLocation.longitude, userLocation.latitude]);
+    entry.marker.setLngLat([fix.longitude, fix.latitude]);
     applyPlayerMarkerZIndex(entry.marker, true);
-    const zoom = map.getZoom();
-    const opacities = getSharedPlayerPresenceZoomState().update(zoom);
     updatePlayerMarkerProps(
       entry,
       selfToMarkerProps(
@@ -1504,8 +1491,7 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
         getPlayerLevel(vehicleProgress),
         getVehicleById(selectedCarId)?.color ?? getVehicleColorForSeed("me"),
       ),
-      zoom,
-      opacities,
+      map.getZoom(),
     );
   }, [ready, profile.handle, profile.rarity, vehicleProgress, selectedCarId, userLocation]);
 
@@ -1669,22 +1655,11 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
       );
       botMarkersRef.current.push(entry);
     });
-    updatePlayerMarkersZoom(
-      botMarkersRef.current,
-      zoom,
-      getSharedPlayerPresenceZoomState().update(zoom),
-    );
+    updatePlayerMarkersZoom(botMarkersRef.current, zoom);
     syncMountedPlayerMarkerViewport(map, botMarkersRef.current);
 
     const onZoom = () => {
-      const z = map.getZoom();
-      const presence = getSharedPlayerPresenceZoomState();
-      const opacities = presence.update(z);
-      applyPlayerPresenceOpacity(
-        botMarkersRef.current,
-        z,
-        opacities,
-      );
+      applyPlayerPresenceOpacity(botMarkersRef.current, map.getZoom());
       syncMountedPlayerMarkerViewport(map, botMarkersRef.current);
     };
     map.on("zoom", onZoom);
@@ -1829,12 +1804,23 @@ export function MapView({ city, onOpenGarage, focusSpot, routeRequest }: Props) 
               </span>
             </div>
           </div>
-          <button
-            onClick={clearRoute}
-            className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] font-bold tracking-wide text-foreground/80 hover:bg-primary/25 transition whitespace-nowrap"
-          >
-            Сбросить
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {routePhase === "preview" && (
+              <button
+                type="button"
+                onClick={() => setRoutePhase("navigating")}
+                className="rounded-xl bg-accent px-2.5 py-1.5 text-[10px] font-bold tracking-wide text-accent-foreground hover:bg-accent/90 transition whitespace-nowrap"
+              >
+                ПОЕХАЛИ
+              </button>
+            )}
+            <button
+              onClick={clearRoute}
+              className="shrink-0 rounded-xl border border-white/10 bg-white/5 px-2 py-1.5 text-[10px] font-bold tracking-wide text-foreground/80 hover:bg-primary/25 transition whitespace-nowrap"
+            >
+              Сбросить
+            </button>
+          </div>
         </div>
       )}
 
