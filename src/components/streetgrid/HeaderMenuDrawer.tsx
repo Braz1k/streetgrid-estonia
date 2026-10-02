@@ -1,9 +1,11 @@
-import { Bell, Settings, User, X, type LucideIcon } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Bell, Boxes, Settings, User, X, type LucideIcon } from "lucide-react";
 
 type Props = {
   open: boolean;
   onClose: () => void;
   onProfile?: () => void;
+  onCollection?: () => void;
   onLevel?: () => void;
   onNotifications?: () => void;
   onSettings?: () => void;
@@ -25,6 +27,13 @@ const ITEMS: DrawerItem[] = [
     title: "Профиль",
     description: "Настройка фото, ника, статуса",
     accent: "cyan",
+  },
+  {
+    id: "collection",
+    icon: Boxes,
+    title: "Коллекция",
+    description: "Виртуальные автомобили STREETGRID",
+    accent: "purple",
   },
   {
     id: "level",
@@ -53,6 +62,7 @@ export function HeaderMenuDrawer({
   open,
   onClose,
   onProfile,
+  onCollection,
   onLevel,
   onNotifications,
   onSettings,
@@ -61,12 +71,13 @@ export function HeaderMenuDrawer({
 
   const handlers: Record<string, (() => void) | undefined> = {
     profile: onProfile,
+    collection: onCollection,
     level: onLevel,
     notifications: onNotifications,
     settings: onSettings,
   };
 
-  return (
+  const drawer = (
     <div className="sg-drawer" role="dialog" aria-modal="true" aria-label="Menu">
       <button type="button" className="sg-drawer__backdrop" aria-label="Close menu" onClick={onClose} />
       <aside className="sg-drawer__panel">
@@ -107,4 +118,7 @@ export function HeaderMenuDrawer({
       </aside>
     </div>
   );
+
+  const shell = document.querySelector(".sg-app-shell");
+  return shell ? createPortal(drawer, shell) : drawer;
 }

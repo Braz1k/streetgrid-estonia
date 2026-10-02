@@ -30,17 +30,17 @@ export function SpotDetailPanel({ spot, onClose, onRoute }: Props) {
 
   return (
     <div
-      className="absolute bottom-[58px] left-0 right-0 z-[650] pointer-events-auto animate-float-up"
+      className="absolute bottom-[calc(var(--sg-tabbar-height)+8px)] left-0 right-0 z-[650] pointer-events-auto animate-float-up"
       onClick={(e) => e.stopPropagation()}
     >
       <div
         className={cn(
-          "glass-strong rounded-t-3xl border-t p-5 pb-10 max-h-[58vh] overflow-y-auto",
+          "glass-strong rounded-t-3xl border-t p-5 max-h-[58vh] overflow-y-auto",
           RARITY_PANEL[spot.rarity],
         )}
       >
         <div className="flex items-start justify-between gap-3 mb-4">
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div
               className="h-14 w-14 shrink-0 rounded-2xl grid place-items-center text-2xl border-2"
               style={{
@@ -60,7 +60,7 @@ export function SpotDetailPanel({ spot, onClose, onRoute }: Props) {
               >
                 {visual.label}
               </span>
-              <h2 className="font-display font-black text-lg leading-tight truncate">{spot.name}</h2>
+              <h2 className="font-display font-black text-lg leading-tight whitespace-normal">{spot.name}</h2>
               {spot.userAdded && (
                 <span className="text-[10px] text-muted-foreground">Добавлено игроками</span>
               )}

@@ -5,7 +5,12 @@ import { StreetGridPremiumHeader } from "./StreetGridPremiumHeader";
 import { HeaderMenuDrawer } from "./HeaderMenuDrawer";
 import { usePlayerProgress } from "./PlayerProgressBlock";
 
-export function Header() {
+type Props = {
+  onOpenProfile: () => void;
+  onOpenCollection: () => void;
+};
+
+export function Header({ onOpenProfile, onOpenCollection }: Props) {
   const { profile } = useStreetGrid();
   const { level, currentXP, requiredXP } = usePlayerProgress();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -21,6 +26,7 @@ export function Header() {
       >
         <StreetGridPremiumHeader
           nickname={profile.handle}
+          avatar={profile.avatar}
           level={level}
           currentXP={currentXP}
           requiredXP={requiredXP}
@@ -35,7 +41,8 @@ export function Header() {
       <HeaderMenuDrawer
         open={menuOpen}
         onClose={() => setMenuOpen(false)}
-        onProfile={openSettings}
+        onProfile={onOpenProfile}
+        onCollection={onOpenCollection}
         onLevel={openSettings}
         onNotifications={openSettings}
         onSettings={openSettings}

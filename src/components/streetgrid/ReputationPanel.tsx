@@ -28,22 +28,25 @@ export function ReputationPanel({ progress }: Props) {
   const nextNeed = next ? next.minScore - score : 0;
 
   return (
-    <section className="glass rounded-2xl p-4 border border-white/5">
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <h3 className="font-display font-black text-sm">РЕПУТАЦИЯ</h3>
+    <section className="sg-profile-reputation">
+      <div className="sg-profile-reputation__head">
+        <div>
+          <span>SOCIAL RANK</span>
+          <h3>РЕПУТАЦИЯ</h3>
+        </div>
         <ReputationBadge rank={rank} size="md" />
       </div>
 
-      <div className="mb-3">
-        <div className="flex items-center justify-between text-[10px] mb-1">
-          <span className="text-muted-foreground tracking-wider">
+      <div className="sg-profile-reputation__progress">
+        <div className="sg-profile-reputation__progress-copy">
+          <span>
             {next ? `До ${next.label}` : "MAX RANK"}
           </span>
-          <span className="font-bold" style={{ color: rank.color }}>{pct}%</span>
+          <strong style={{ color: rank.color }}>{pct}%</strong>
         </div>
-        <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+        <div className="sg-profile-reputation__track">
           <div
-            className="h-full rounded-full transition-all duration-500"
+            className="sg-profile-reputation__fill"
             style={{
               width: `${pct}%`,
               background: `linear-gradient(90deg, ${rank.color}88, ${rank.color})`,
@@ -52,26 +55,26 @@ export function ReputationPanel({ progress }: Props) {
           />
         </div>
         {next && (
-          <p className="text-[9px] text-muted-foreground mt-1">
+          <p>
             Ещё {Math.max(0, nextNeed)} очков до {next.label}
           </p>
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="sg-profile-reputation__stats">
         {STAT_ROWS.map(({ key, label, icon: Icon, unit, weight }) => {
           const val = progress[key];
           const pts = Math.round(val * weight);
           return (
-            <div key={key} className="rounded-xl bg-white/5 border border-white/5 px-2.5 py-2">
-              <div className="flex items-center gap-1 text-[9px] text-muted-foreground tracking-wider">
-                <Icon className="h-3 w-3" style={{ color: rank.color }} />
+            <div key={key} className="sg-profile-reputation__stat">
+              <div>
+                <Icon style={{ color: rank.color }} />
                 {label}
               </div>
-              <div className="font-display font-black text-sm mt-0.5">
+              <strong>
                 {unit ? `${Math.round(val)} ${unit}` : val}
-              </div>
-              <div className="text-[9px] text-muted-foreground">+{pts} pts</div>
+              </strong>
+              <span>+{pts} pts</span>
             </div>
           );
         })}

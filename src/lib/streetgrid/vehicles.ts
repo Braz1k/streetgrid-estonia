@@ -276,6 +276,20 @@ export const DEFAULT_OWNED: OwnedVehicle[] = [
   { vehicleId: "bmw_m3", level: 4, xp: 3250, acquiredAt: Date.now() - 86400000 * 30 },
 ];
 
+/** Player progression. Level is stored, not derived from the equipped car. */
+export type PlayerProgress = {
+  level: number;
+  xp: number;
+};
+
+const DEFAULT_STARTER = DEFAULT_OWNED.find((o) => o.vehicleId === "bmw_m3") ?? DEFAULT_OWNED[0];
+
+/** Matches the existing default header: starter BMW level and in-level XP. */
+export const DEFAULT_PLAYER_PROGRESS: PlayerProgress = {
+  level: DEFAULT_STARTER?.level ?? 1,
+  xp: DEFAULT_STARTER?.xp ?? 0,
+};
+
 /** XP needed to complete one level (bar fills 0→100% within level). */
 export const XP_PER_LEVEL = 5000;
 
@@ -313,8 +327,36 @@ export function isVehicleUnlocked(
   }
 }
 
-/** Highest level among owned vehicles — used for level-gated unlocks. */
+/** Highest level among owned vehicle rows. Not the player unlock level. */
 export function getPlayerLevel(progress: VehicleProgress): number {
   if (progress.owned.length === 0) return 1;
   return Math.max(...progress.owned.map((o) => o.level));
+}
+
+/**
+ * Grant level-gated catalog vehicles the player has reached.
+ * Does not equip, and does not change cars already in `owned`.
+ * Achievement, distance, and spot unlocks are ignored.
+ */
+export function syncLevelVehicleUnlocks(
+  progress: VehicleProgress,
+  playerLevel: number,
+): VehicleProgress {
+  if (!Number.isFinite(playerLevel)) return progress;
+  const ownedIds = new Set(progress.owned.map((o) => o.vehicleId));
+  const granted: OwnedVehicle[] = [];
+  const acquiredAt = Date.now();
+  for (const vehicle of VEHICLE_CATALOG) {
+    if (vehicle.unlock.type !== "level") continue;
+    if (playerLevel < vehicle.unlock.level) continue;
+    if (ownedIds.has(vehicle.id)) continue;
+    granted.push({
+      vehicleId: vehicle.id,
+      level: 1,
+      xp: 0,
+      acquiredAt,
+    });
+  }
+  if (granted.length === 0) return progress;
+  return { ...progress, owned: [...progress.owned, ...granted] };
 }

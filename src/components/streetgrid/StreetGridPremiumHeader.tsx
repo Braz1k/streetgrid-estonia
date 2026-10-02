@@ -3,6 +3,7 @@ import { BadgeCheck, Bell, Menu, Settings } from "lucide-react";
 
 export type StreetGridPremiumHeaderProps = {
   nickname: string;
+  avatar: string;
   level: number;
   currentXP: number;
   requiredXP: number;
@@ -27,10 +28,21 @@ function getInitials(nickname: string): string {
   return raw.slice(0, 2).toUpperCase();
 }
 
-function InitialsAvatar({ initials, online }: { initials: string; online: boolean }) {
+function isAvatarImage(value: string): boolean {
+  return /^(https?:\/\/|data:image\/|blob:|\/)/i.test(value);
+}
+
+function HeaderAvatar({ avatar, online }: { avatar: string; online: boolean }) {
+  const image = isAvatarImage(avatar);
   return (
     <figure className="sg-mhdr__avatar" aria-label="Player avatar">
-      <span className="sg-mhdr__initials">{initials}</span>
+      <span className="sg-mhdr__face">
+        {image ? (
+          <img src={avatar} alt="" draggable={false} />
+        ) : (
+          <span className="sg-mhdr__initials">{avatar.slice(0, 2) || getInitials(avatar)}</span>
+        )}
+      </span>
       {online ? (
         <span className="sg-mhdr__online" aria-label="Online" title="Online" />
       ) : null}
@@ -83,6 +95,7 @@ function HeaderActionButton({
 
 export function StreetGridPremiumHeader({
   nickname,
+  avatar,
   level,
   currentXP,
   requiredXP,
@@ -101,7 +114,7 @@ export function StreetGridPremiumHeader({
   return (
     <div className="sg-mhdr">
       <div className="sg-mhdr__row sg-mhdr__row--1">
-        <InitialsAvatar initials={getInitials(nickname)} online={online} />
+        <HeaderAvatar avatar={avatar} online={online} />
 
         <div className="sg-mhdr__intro">
           <h1 className="sg-mhdr__brand">

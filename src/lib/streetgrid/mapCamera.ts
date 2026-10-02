@@ -8,6 +8,59 @@ export type MapPadding = {
   right: number;
 };
 
+/** Bumped whenever the DRIVE camera implementation changes. A live controller without this was created before the change. */
+export const DRIVE_CAMERA_REVISION = "drive-real-2026-10-01";
+
+export type CameraWriteRecord = {
+  at: number;
+  method: string;
+  mapId: string;
+  navMode: string;
+  routePhase: string | null;
+  center: string;
+  zoom: number;
+  pitch: number;
+  bearing: number;
+  purpose: string;
+};
+
+const cameraWrites: CameraWriteRecord[] = [];
+let mapSerial = 0;
+let controllerSerial = 0;
+const mapIds = new WeakMap<object, string>();
+const controllerIds = new WeakMap<object, string>();
+
+export function mapInstanceId(map: object | null | undefined): string {
+  if (!map) return "none";
+  let id = mapIds.get(map);
+  if (!id) {
+    mapSerial += 1;
+    id = `map-${mapSerial}`;
+    mapIds.set(map, id);
+  }
+  return id;
+}
+
+export function cameraControllerId(controller: object | null | undefined): string {
+  if (!controller) return "none";
+  let id = controllerIds.get(controller);
+  if (!id) {
+    controllerSerial += 1;
+    id = `cam-${controllerSerial}`;
+    controllerIds.set(controller, id);
+  }
+  return id;
+}
+
+export function recentCameraWrites(): CameraWriteRecord[] {
+  return cameraWrites.slice(-8);
+}
+
+export function recordCameraWrite(entry: CameraWriteRecord) {
+  cameraWrites.push(entry);
+  if (cameraWrites.length > 40) cameraWrites.shift();
+}
+
 /** Cinematic camera timing — 350–600 ms scaled by move magnitude. */
 export const CAMERA_DURATION_MIN_MS = 350;
 export const CAMERA_DURATION_MAX_MS = 600;
@@ -103,14 +156,20 @@ export function computeDynamicPadding(
     right += clusterPad * 0.25;
   }
 
-  // Visual center: player ~42% from top → extra bottom inset in follow modes.
-  if (ctx.navMode === "FOLLOW" || ctx.navMode === "DRIVE") {
+  // FOLLOW keeps the player slightly above the geometric center.
+  if (ctx.navMode === "FOLLOW") {
     const followBias = Math.max(24, Math.round(viewport.height * (0.5 - FOLLOW_PLAYER_Y_RATIO)));
     bottom += followBias;
-    if (ctx.navMode === "DRIVE") {
-      bottom += Math.round(followBias * 0.35);
-      top += 12;
-    }
+  }
+
+  // DRIVE looks at a point ahead of the vehicle. Place that point high enough
+  // that the vehicle itself sits in the lower-center of the viewport.
+  if (ctx.navMode === "DRIVE") {
+    const vehicleY = viewport.height * 0.75;
+    const aheadPx = Math.min(180, Math.max(110, Math.round(viewport.height * 0.2)));
+    const centerY = Math.max(top + 24, vehicleY - aheadPx);
+    const focalBottom = viewport.height - top - 2 * (centerY - top);
+    bottom = Math.max(bottom, Math.round(focalBottom));
   }
 
   return {
@@ -152,18 +211,44 @@ export function distanceMeters(
 
 export type FollowCameraGate = {
   lastCenter: { lat: number; lng: number } | null;
+  lastHeading: number | null;
   lastAtMs: number;
 };
 
 export function createFollowCameraGate(): FollowCameraGate {
-  return { lastCenter: null, lastAtMs: 0 };
+  return { lastCenter: null, lastAtMs: 0, lastHeading: null };
+}
+
+function headingDelta(a: number, b: number): number {
+  return Math.abs(shortestSignedDelta(a, b));
+}
+
+function normalizeHeading(deg: number): number {
+  return ((deg % 360) + 360) % 360;
+}
+
+/** Signed turn in (-180, 180]. 359° → 1° is +2°, not −358°. */
+function shortestSignedDelta(from: number, to: number): number {
+  return ((((to - from) % 360) + 540) % 360) - 180;
+}
+
+/** DRIVE rotation rate. A right angle finishes in about half a second. */
+const DRIVE_HEADING_DEG_PER_SEC = 220;
+const DRIVE_HEADING_MAX_STEP_S = 0.05;
+
+function advanceDriveHeading(shown: number, target: number, fromMs: number, nowMs: number): number {
+  const dt = Math.min(DRIVE_HEADING_MAX_STEP_S, Math.max(0.008, (nowMs - fromMs) / 1000));
+  const delta = shortestSignedDelta(shown, target);
+  const step = Math.min(Math.abs(delta), DRIVE_HEADING_DEG_PER_SEC * dt);
+  if (Math.abs(delta) - step <= 0.05) return normalizeHeading(target);
+  return normalizeHeading(shown + Math.sign(delta) * step);
 }
 
 export function shouldApplyFollowCamera(
   gate: FollowCameraGate,
   lat: number,
   lng: number,
-  opts: { minIntervalMs?: number; minMoveMeters?: number; force?: boolean } = {},
+  opts: { minIntervalMs?: number; minMoveMeters?: number; force?: boolean; heading?: number } = {},
 ): boolean {
   if (opts.force) return true;
   const minIntervalMs = opts.minIntervalMs ?? 480;
@@ -175,13 +260,30 @@ export function shouldApplyFollowCamera(
   const elapsed = now - gate.lastAtMs;
   if (elapsed >= minIntervalMs && moved >= minMoveMeters) return true;
   if (moved >= minMoveMeters * 2.8) return true;
+  if (
+    opts.heading != null &&
+    gate.lastHeading != null &&
+    elapsed >= minIntervalMs &&
+    headingDelta(gate.lastHeading, opts.heading) >= 6
+  ) {
+    return true;
+  }
   return false;
 }
 
-export function recordFollowCamera(gate: FollowCameraGate, lat: number, lng: number) {
+export function recordFollowCamera(
+  gate: FollowCameraGate,
+  lat: number,
+  lng: number,
+  heading?: number,
+) {
   gate.lastCenter = { lat, lng };
   gate.lastAtMs = Date.now();
+  if (heading != null && Number.isFinite(heading)) gate.lastHeading = heading;
 }
+
+/** DRIVE tilt. 62° keeps the horizon in view without dropping the 3D frame. */
+const DRIVE_VIEW_PITCH = 62;
 
 /** Offset map center ahead of the player in movement direction. */
 export function lookAheadCenter(
@@ -189,10 +291,11 @@ export function lookAheadCenter(
   lat: number,
   headingDeg: number,
   navMode: NavMode,
+  metersOverride?: number,
 ): [number, number] {
   if (navMode === "FREE") return [lng, lat];
 
-  const meters = navMode === "DRIVE" ? 78 : 32;
+  const meters = metersOverride ?? (navMode === "DRIVE" ? 42 : 32);
   const bearing = ((headingDeg % 360) + 360) % 360;
   const rad = (bearing * Math.PI) / 180;
   const latRad = (lat * Math.PI) / 180;
@@ -271,6 +374,22 @@ type CameraMoveOptions = {
   duration?: number;
   force?: boolean;
   priority?: CameraPriority;
+  routePhase?: string | null;
+};
+
+export type DriveCameraTrace = {
+  operation: "jumpTo" | "easeTo" | "skipped";
+  reason: string;
+  navMode: "DRIVE";
+  routePhase: string | null;
+  player: { latitude: number; longitude: number };
+  target: { latitude: number; longitude: number };
+  centerBefore: { latitude: number; longitude: number };
+  centerAfter: { latitude: number; longitude: number };
+  bearing: number;
+  pitch: number;
+  zoom: number;
+  padding: MapPadding;
 };
 
 function markProgrammatic(
@@ -304,21 +423,79 @@ export class MapCameraController {
   private lastFlyKey = "";
   private lastFlyAtMs = 0;
   private animating = false;
+  /** Ignore the moveend Mapbox fires synchronously while stopping the previous ease. */
+  private ignoreMoveEnd = 0;
+  /** DRIVE owns the map until navigation ends or the user takes the camera. */
+  private driveLock = false;
+  private driveAnchor: { lat: number; lng: number; heading: number } | null = null;
+  private driveLookAheadM = 42;
+  /** Heading currently applied to both bearing and look-ahead. */
+  private driveShownHeading: number | null = null;
+  private driveHeadingTarget: number | null = null;
+  private driveHeadingSpin = 0;
+  private driveHeadingStamp = 0;
+
+  releaseDrive() {
+    this.cancelHeadingSpin();
+    this.driveLock = false;
+    this.driveAnchor = null;
+    this.driveLookAheadM = 42;
+    this.driveShownHeading = null;
+    this.driveHeadingTarget = null;
+  }
+
+  isDriveOwned() {
+    return this.driveLock;
+  }
+
+  /** Take the camera before any preview fit or padding jump can write again. */
+  claimDrive() {
+    this.cancelHeadingSpin();
+    this.driveLock = true;
+    this.pending = null;
+    const map = this.map;
+    if (!map) return;
+    this.ignoreMoveEnd++;
+    try {
+      if (map.isMoving()) map.stop();
+    } finally {
+      this.ignoreMoveEnd--;
+    }
+  }
+
+  driveLookAheadMeters() {
+    return this.driveLookAheadM;
+  }
   private activePriority: CameraPriority | null = null;
   private pending: PendingMove | null = null;
   private boundMoveStart: (() => void) | null = null;
   private boundMoveEnd: (() => void) | null = null;
   onProgrammatic?: (active: boolean) => void;
+  readonly revision = DRIVE_CAMERA_REVISION;
+
+  attachedMap(): mapboxgl.Map | null {
+    return this.map;
+  }
 
   attach(map: mapboxgl.Map) {
+    const previous = this.map;
+    console.info("[DRIVE-REAL] CAMERA_ATTACH", {
+      controllerId: cameraControllerId(this),
+      revision: this.revision,
+      mapId: mapInstanceId(map),
+      previousMapId: mapInstanceId(previous),
+      replaced: previous != null && previous !== map,
+    });
     this.map = map;
     this.boundMoveStart = () => {
       this.animating = true;
     };
     this.boundMoveEnd = () => {
+      if (this.ignoreMoveEnd > 0) return;
       this.animating = false;
       this.activePriority = null;
       this.flushPending();
+      this.reassertDriveCamera();
     };
     map.on("movestart", this.boundMoveStart);
     map.on("moveend", this.boundMoveEnd);
@@ -326,6 +503,10 @@ export class MapCameraController {
 
   detach() {
     const map = this.map;
+    console.info("[DRIVE-REAL] CAMERA_DETACH", {
+      controllerId: cameraControllerId(this),
+      mapId: mapInstanceId(map),
+    });
     if (map && this.boundMoveStart) map.off("movestart", this.boundMoveStart);
     if (map && this.boundMoveEnd) map.off("moveend", this.boundMoveEnd);
     this.map = null;
@@ -363,7 +544,14 @@ export class MapCameraController {
     this.padding = next;
     this.paddingCtxKey = key;
 
-    if (this.map && (force || !this.animating)) {
+    if (ctx.navMode && ctx.navMode !== "DRIVE") this.releaseDrive();
+
+    const moving = this.animating || !!this.map?.isMoving();
+    // setPadding is jumpTo(). During DRIVE that stops the follow and shifts
+    // the geographic center away from the player. Padding is applied only
+    // inside the DRIVE jump/ease.
+    const driveOwnsPadding = this.driveLock || merged.navMode === "DRIVE";
+    if (this.map && !moving && !driveOwnsPadding) {
       applyMapPadding(this.map, next);
     }
     return next;
@@ -402,15 +590,20 @@ export class MapCameraController {
     this.scheduleOrRun(priority, opts?.force, () => {
       this.activePriority = priority;
       this.animating = true;
-      applyMapPadding(map, this.padding);
-      markProgrammatic(map, durationMs, opts?.onProgrammatic ?? this.onProgrammatic);
-      fn();
+      this.ignoreMoveEnd++;
+      try {
+        markProgrammatic(map, durationMs, opts?.onProgrammatic ?? this.onProgrammatic);
+        fn();
+      } finally {
+        this.ignoreMoveEnd--;
+      }
+      this.animating = true;
     });
   }
 
   easeTo(options: mapboxgl.EaseToOptions & CameraMoveOptions) {
     const map = this.map;
-    if (!map) return;
+    if (!map || this.driveLock) return;
 
     const { onProgrammatic, duration, force, priority = "navigate", ...rest } = options;
     const target = {
@@ -439,9 +632,9 @@ export class MapCameraController {
     );
   }
 
-  flyTo(options: mapboxgl.FlyToOptions & CameraMoveOptions) {
+  flyTo(options: mapboxgl.FlyToOptions & CameraMoveOptions): boolean {
     const map = this.map;
-    if (!map) return;
+    if (!map || this.driveLock) return false;
 
     const { onProgrammatic, duration, force, priority = "navigate", ...rest } = options;
     const target = {
@@ -452,7 +645,7 @@ export class MapCameraController {
     };
     const durationMs = duration ?? computeMoveDurationMs(map, target, CAMERA_DURATION_MAX_MS * 0.85, CAMERA_DURATION_MAX_MS);
 
-    if (!force && this.isDuplicateFly(target)) return;
+    if (!force && this.isDuplicateFly(target)) return false;
 
     this.startMove(
       priority,
@@ -468,6 +661,7 @@ export class MapCameraController {
       },
       { onProgrammatic, force },
     );
+    return true;
   }
 
   fitBounds(
@@ -475,7 +669,7 @@ export class MapCameraController {
     options: mapboxgl.FitBoundsOptions & CameraMoveOptions & { dedupeMs?: number } = {},
   ) {
     const map = this.map;
-    if (!map) return;
+    if (!map || this.driveLock) return;
 
     const pad = (options.padding ?? this.padding) as MapPadding;
     const maxZoom = options.maxZoom ?? 18;
@@ -517,9 +711,380 @@ export class MapCameraController {
     heading: number,
     navMode: NavMode,
     opts: CameraMoveOptions & { minIntervalMs?: number } = {},
-  ) {
+  ): DriveCameraTrace | undefined {
     const map = this.map;
+    if (navMode === "DRIVE") {
+      const center = map?.getCenter();
+      console.info("[DRIVE-REAL] followPlayer", {
+        controllerId: cameraControllerId(this),
+        revision: this.revision,
+        mapId: mapInstanceId(map),
+        displayLocation: { latitude: lat, longitude: lng },
+        target: (() => {
+          const ahead = lookAheadCenter(lng, lat, heading, "DRIVE");
+          return { latitude: ahead[1], longitude: ahead[0] };
+        })(),
+        navMode,
+        routePhase: opts.routePhase ?? null,
+        mapCenter: center ? { latitude: center.lat, longitude: center.lng } : null,
+        zoom: map?.getZoom() ?? null,
+        pitch: map?.getPitch() ?? null,
+        bearing: map?.getBearing() ?? null,
+        skipped: !map ? "no-map" : null,
+      });
+    }
     if (!map || navMode === "FREE") return;
+
+    if (navMode !== "DRIVE") {
+      this.followFreeOrFollow(map, lat, lng, heading, navMode, opts);
+      return;
+    }
+
+    return this.followDrive(map, lat, lng, heading, opts);
+  }
+
+  private followDrive(
+    map: mapboxgl.Map,
+    lat: number,
+    lng: number,
+    heading: number,
+    opts: CameraMoveOptions & { minIntervalMs?: number },
+  ): DriveCameraTrace {
+    this.driveLock = true;
+    this.pending = null;
+
+    const padding = this.syncPadding({ ...this.paddingContextStore, navMode: "DRIVE" }, false);
+    const before = map.getCenter();
+    const centerBefore = { latitude: before.lat, longitude: before.lng };
+    const zoom = map.getZoom();
+    const pitch = map.getPitch();
+    const bearing = map.getBearing();
+    const headingPending =
+      this.driveShownHeading == null ||
+      headingDelta(this.driveShownHeading, heading) >= 0.8 ||
+      (this.driveHeadingTarget != null && headingDelta(this.driveShownHeading, this.driveHeadingTarget) >= 0.35);
+    const bearingOff = headingDelta(bearing, heading) >= 0.8;
+    const aimed = this.driveShownHeading ?? heading;
+    const provisional = lookAheadCenter(lng, lat, aimed, "DRIVE", this.driveLookAheadM);
+    const target = { latitude: provisional[1], longitude: provisional[0] };
+    const gapM = distanceMeters(
+      { lat: before.lat, lng: before.lng },
+      { lat: provisional[1], lng: provisional[0] },
+    );
+    // A lost frame still jumps. A heading change steps instead of jumping the whole turn.
+    const frameOff = gapM > 48 || zoom < 17 || pitch < 55;
+    const mustMove = gapM > 8 || frameOff || bearingOff || headingPending;
+
+    const traceBase = {
+      navMode: "DRIVE" as const,
+      routePhase: opts.routePhase ?? null,
+      player: { latitude: lat, longitude: lng },
+      target,
+      centerBefore,
+      bearing,
+      pitch,
+      zoom,
+      padding: map.getPadding() as MapPadding,
+    };
+
+    if (!opts.force && !mustMove) {
+      if (
+        !shouldApplyFollowCamera(this.followGate, lat, lng, {
+          minIntervalMs: opts.minIntervalMs ?? 420,
+          minMoveMeters: 4,
+          heading,
+        })
+      ) {
+        return this.traceDrive(map, { ...traceBase, operation: "skipped", reason: "throttle" });
+      }
+      if (
+        this.isDuplicateFollow(map, {
+          center: provisional,
+          zoom: 18,
+          pitch: DRIVE_VIEW_PITCH,
+          bearing: aimed,
+        })
+      ) {
+        return this.traceDrive(map, { ...traceBase, operation: "skipped", reason: "duplicate-frame" });
+      }
+    }
+
+    const shown = this.presentDriveHeading(heading, !!opts.force);
+    this.driveAnchor = { lat, lng, heading: shown };
+    const placedCenter = lookAheadCenter(lng, lat, shown, "DRIVE", this.driveLookAheadM);
+    const catchingUp =
+      this.driveHeadingTarget != null && headingDelta(shown, this.driveHeadingTarget) > 0.35;
+    const compose = opts.force || (frameOff && !catchingUp);
+    const operation = catchingUp && !compose ? "easeTo" : compose ? "jumpTo" : "easeTo";
+    const reason = catchingUp && !compose ? "heading-turn" : frameOff ? "camera-far-from-player" : "player-moved";
+    const placed = compose
+      ? this.composeDriveFrame(map, lng, lat, shown, padding)
+      : { center: placedCenter, lookAheadM: this.driveLookAheadM };
+    if (!compose) {
+      this.writeDriveFollowFrame(map, placed.center, shown, padding, catchingUp ? 40 : CAMERA_DURATION_MAX_MS);
+      if (catchingUp) this.kickHeadingSpin();
+    }
+    const screen = this.playerScreen(map, lng, lat);
+    requestAnimationFrame(() => {
+      const after = map.getCenter();
+      console.info("[DRIVE-REAL] CAMERA_AFTER_WRITE", {
+        mapId: mapInstanceId(map),
+        mapCenter: { latitude: after.lat, longitude: after.lng },
+        zoom: map.getZoom(),
+        pitch: map.getPitch(),
+        bearing: map.getBearing(),
+        heading: shown,
+        headingTarget: this.driveHeadingTarget,
+        lookAheadM: this.driveLookAheadM,
+        playerScreen: this.playerScreen(map, lng, lat),
+        type: operation,
+      });
+    });
+    recordFollowCamera(this.followGate, lat, lng, shown);
+    return this.traceDrive(map, {
+      ...traceBase,
+      target: { latitude: placed.center[1], longitude: placed.center[0] },
+      operation,
+      reason,
+      bearing: screen ? shown : bearing,
+    });
+  }
+
+  /** Adopt the target at once, or move one shortest-angle step toward it. */
+  private presentDriveHeading(target: number, immediate: boolean): number {
+    const next = normalizeHeading(target);
+    this.driveHeadingTarget = next;
+    if (immediate || this.driveShownHeading == null) {
+      this.cancelHeadingSpin();
+      this.driveShownHeading = next;
+      this.driveHeadingStamp = performance.now();
+      return next;
+    }
+    const now = performance.now();
+    this.driveShownHeading = advanceDriveHeading(this.driveShownHeading, next, this.driveHeadingStamp, now);
+    this.driveHeadingStamp = now;
+    return this.driveShownHeading;
+  }
+
+  private cancelHeadingSpin() {
+    if (!this.driveHeadingSpin) return;
+    cancelAnimationFrame(this.driveHeadingSpin);
+    this.driveHeadingSpin = 0;
+  }
+
+  /** Keep bearing and look-ahead on the same heading until the turn finishes. */
+  private kickHeadingSpin() {
+    if (this.driveHeadingSpin) return;
+    const tick = () => {
+      this.driveHeadingSpin = 0;
+      const map = this.map;
+      const anchor = this.driveAnchor;
+      if (
+        !this.driveLock ||
+        !map ||
+        !anchor ||
+        this.driveShownHeading == null ||
+        this.driveHeadingTarget == null
+      ) {
+        return;
+      }
+      const now = performance.now();
+      const shown = advanceDriveHeading(this.driveShownHeading, this.driveHeadingTarget, this.driveHeadingStamp, now);
+      this.driveHeadingStamp = now;
+      this.driveShownHeading = shown;
+      anchor.heading = shown;
+      const center = lookAheadCenter(anchor.lng, anchor.lat, shown, "DRIVE", this.driveLookAheadM);
+      this.writeDriveFollowFrame(map, center, shown, this.padding, 40);
+      if (headingDelta(shown, this.driveHeadingTarget) > 0.35) {
+        this.driveHeadingSpin = requestAnimationFrame(tick);
+      }
+    };
+    this.driveHeadingSpin = requestAnimationFrame(tick);
+  }
+
+  private writeDriveFollowFrame(
+    map: mapboxgl.Map,
+    center: [number, number],
+    heading: number,
+    padding: MapPadding,
+    duration: number,
+  ) {
+    const write = {
+      type: "easeTo",
+      targetCenter: { latitude: center[1], longitude: center[0] },
+      bearing: heading,
+      headingTarget: this.driveHeadingTarget,
+      pitch: DRIVE_VIEW_PITCH,
+      zoom: 18,
+      lookAheadM: this.driveLookAheadM,
+      mapId: mapInstanceId(map),
+      controllerId: cameraControllerId(this),
+      revision: this.revision,
+    };
+    console.info("[DRIVE-REAL] ACTUAL_CAMERA_WRITE", write);
+    console.info("[DRIVE-REAL] CAMERA_WRITE", write);
+    this.ignoreMoveEnd++;
+    try {
+      map.easeTo({
+        center,
+        zoom: 18,
+        pitch: DRIVE_VIEW_PITCH,
+        bearing: heading,
+        padding,
+        duration,
+        easing: cameraEaseOut,
+        essential: true,
+      });
+      this.animating = true;
+    } finally {
+      this.ignoreMoveEnd--;
+    }
+  }
+
+  /** Place the camera so map.project(player) sits near 75% of the viewport height. */
+  private composeDriveFrame(
+    map: mapboxgl.Map,
+    lng: number,
+    lat: number,
+    heading: number,
+    padding: MapPadding,
+  ): { center: [number, number]; lookAheadM: number } {
+    const el = map.getContainer();
+    const height = el.clientHeight || window.innerHeight || 844;
+    this.ignoreMoveEnd++;
+    try {
+      let lookAheadM = this.driveLookAheadM || 40;
+      let center = lookAheadCenter(lng, lat, heading, "DRIVE", lookAheadM);
+      let placed = false;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        map.jumpTo({
+          center,
+          zoom: 18,
+          pitch: DRIVE_VIEW_PITCH,
+          bearing: heading,
+          padding,
+        });
+        const yPercent = map.project([lng, lat]).y / height;
+        if (yPercent >= 0.72 && yPercent <= 0.75) {
+          placed = true;
+          break;
+        }
+        const delta = (0.735 - yPercent) * 160;
+        lookAheadM = Math.max(12, Math.min(130, lookAheadM + delta));
+        center = lookAheadCenter(lng, lat, heading, "DRIVE", lookAheadM);
+      }
+      if (!placed) {
+        map.jumpTo({
+          center,
+          zoom: 18,
+          pitch: DRIVE_VIEW_PITCH,
+          bearing: heading,
+          padding,
+        });
+      }
+      this.driveLookAheadM = lookAheadM;
+      this.animating = false;
+      const screen = this.playerScreen(map, lng, lat);
+      console.info("[DRIVE-REAL] ACTUAL_CAMERA_WRITE", {
+        type: "jumpTo",
+        targetCenter: { latitude: center[1], longitude: center[0] },
+        bearing: heading,
+        pitch: DRIVE_VIEW_PITCH,
+        zoom: 18,
+        lookAheadM,
+        playerScreen: screen,
+        mapId: mapInstanceId(map),
+        controllerId: cameraControllerId(this),
+        revision: this.revision,
+      });
+      return { center, lookAheadM };
+    } finally {
+      this.ignoreMoveEnd--;
+    }
+  }
+
+  private playerScreen(map: mapboxgl.Map, lng: number, lat: number) {
+    const el = map.getContainer();
+    const width = el.clientWidth || window.innerWidth || 1;
+    const height = el.clientHeight || window.innerHeight || 1;
+    const point = map.project([lng, lat]);
+    return {
+      width,
+      height,
+      x: point.x,
+      y: point.y,
+      yPercent: point.y / height,
+    };
+  }
+
+  private traceDrive(
+    map: mapboxgl.Map,
+    trace: Omit<DriveCameraTrace, "centerAfter">,
+  ): DriveCameraTrace {
+    const after = map.getCenter();
+    const full: DriveCameraTrace = {
+      ...trace,
+      centerAfter: { latitude: after.lat, longitude: after.lng },
+      bearing: map.getBearing(),
+      pitch: map.getPitch(),
+      zoom: map.getZoom(),
+      padding: map.getPadding() as MapPadding,
+    };
+    console.info("[StreetGrid DRIVE camera]", {
+      displayLocation: full.player,
+      cameraTarget: full.target,
+      mapCenter: full.centerAfter,
+      mapCenterBefore: full.centerBefore,
+      bearing: full.bearing,
+      pitch: full.pitch,
+      zoom: full.zoom,
+      padding: full.padding,
+      navMode: full.navMode,
+      routePhase: full.routePhase,
+      calledJumpTo: full.operation === "jumpTo",
+      calledEaseTo: full.operation === "easeTo",
+      skipped: full.operation === "skipped" ? full.reason : null,
+    });
+    return full;
+  }
+
+  /** If a preview fit or padding jump left the lens away from the player, put it back. */
+  private reasserting = false;
+  private reassertDriveCamera() {
+    if (this.reasserting) return;
+    const map = this.map;
+    const anchor = this.driveAnchor;
+    if (!this.driveLock || !map || !anchor || map.isMoving()) return;
+    const center = lookAheadCenter(anchor.lng, anchor.lat, anchor.heading, "DRIVE", this.driveLookAheadM);
+    const gapM = distanceMeters(
+      { lat: map.getCenter().lat, lng: map.getCenter().lng },
+      { lat: center[1], lng: center[0] },
+    );
+    if (
+      this.driveHeadingTarget != null &&
+      this.driveShownHeading != null &&
+      headingDelta(this.driveShownHeading, this.driveHeadingTarget) > 0.35
+    ) {
+      return;
+    }
+    if (gapM <= 48 && map.getZoom() >= 17 && map.getPitch() >= 55) return;
+    this.reasserting = true;
+    try {
+      this.followDrive(map, anchor.lat, anchor.lng, anchor.heading, { force: true });
+    } finally {
+      this.reasserting = false;
+    }
+  }
+
+  private followFreeOrFollow(
+    map: mapboxgl.Map,
+    lat: number,
+    lng: number,
+    heading: number,
+    navMode: NavMode,
+    opts: CameraMoveOptions & { minIntervalMs?: number },
+  ) {
+    if (opts.force) this.pending = null;
 
     if (
       !opts.force &&
@@ -532,18 +1097,11 @@ export class MapCameraController {
 
     const center = lookAheadCenter(lng, lat, heading, navMode);
     const padding = this.syncPadding({ ...this.paddingContextStore, navMode }, false);
-
     const currentZoom = map.getZoom();
-    const targetZoom = navMode === "DRIVE" ? 18 : currentZoom;
-    const targetPitch = navMode === "DRIVE" ? 65 : map.getPitch();
-    const targetBearing = navMode === "DRIVE" ? heading : map.getBearing();
-
-    const followTarget = {
-      center,
-      zoom: targetZoom,
-      pitch: targetPitch,
-      bearing: targetBearing,
-    };
+    const targetZoom = currentZoom;
+    const targetPitch = map.getPitch();
+    const targetBearing = map.getBearing();
+    const followTarget = { center, zoom: targetZoom, pitch: targetPitch, bearing: targetBearing };
 
     if (!opts.force && this.isDuplicateFollow(map, followTarget)) return;
 
@@ -551,13 +1109,14 @@ export class MapCameraController {
       map,
       followTarget,
       CAMERA_DURATION_MIN_MS,
-      navMode === "DRIVE" ? CAMERA_DURATION_MAX_MS : CAMERA_DURATION_MIN_MS + 80,
+      CAMERA_DURATION_MIN_MS + 80,
     );
 
     this.startMove(
       "follow",
       durationMs,
       () => {
+        recordFollowCamera(this.followGate, lat, lng);
         map.easeTo({
           center,
           zoom: targetZoom,
@@ -571,8 +1130,6 @@ export class MapCameraController {
       },
       { onProgrammatic: opts.onProgrammatic, force: opts.force },
     );
-
-    recordFollowCamera(this.followGate, lat, lng);
   }
 
   /** After user pinch-zoom in follow modes — one recentre, deduped against GPS follow. */

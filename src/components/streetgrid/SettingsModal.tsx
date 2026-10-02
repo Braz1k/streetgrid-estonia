@@ -1,6 +1,14 @@
 import { useState } from "react";
-import { X, User, Map as MapIcon, Bell, Cog, LogOut, Trash2, Car } from "lucide-react";
-import { useStreetGrid, type DriverStatus, type Language, type NavProvider } from "@/lib/streetgrid/store";
+import { createPortal } from "react-dom";
+import { X, User, Map as MapIcon, Bell, Cog, LogOut, Trash2, Car, Palette } from "lucide-react";
+import {
+  NEON_ACCENTS,
+  STREETGRID_STORAGE_KEYS,
+  useStreetGrid,
+  type DriverStatus,
+  type Language,
+  type NavProvider,
+} from "@/lib/streetgrid/store";
 import { getVehicleById } from "@/lib/streetgrid/vehicles";
 
 type Props = { open: boolean; onClose: () => void };
@@ -32,8 +40,7 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const clearCache = () => {
     try {
-      localStorage.clear();
-      sessionStorage.clear();
+      STREETGRID_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key));
     } catch {
       /* noop */
     }
@@ -45,10 +52,10 @@ export function SettingsModal({ open, onClose }: Props) {
     setTimeout(onClose, 600);
   };
 
-  return (
+  const modal = (
     <div
       onClick={onClose}
-      className="fixed inset-0 z-[999] bg-black/75 backdrop-blur-md grid place-items-end sm:place-items-center animate-float-up"
+      className="absolute inset-0 z-[999] bg-black/75 backdrop-blur-md grid place-items-end sm:place-items-center animate-float-up"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -103,6 +110,34 @@ export function SettingsModal({ open, onClose }: Props) {
                 })}
               </div>
             </Field>
+          </Section>
+
+          <Section icon={Palette} title="ВНЕШНИЙ ВИД" accent="accent">
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="text-[10px] tracking-widest text-muted-foreground">ЦВЕТ НЕОНА</div>
+                <div className="text-[10px] font-bold tracking-widest text-foreground/80">
+                  {NEON_ACCENTS.find((color) => color.id === settings.neon)?.label}
+                </div>
+              </div>
+              <div className="sg-neon-swatches" role="radiogroup" aria-label="Цвет неона">
+                {NEON_ACCENTS.map((color) => {
+                  const active = settings.neon === color.id;
+                  return (
+                    <button
+                      key={color.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      aria-label={color.label}
+                      className={active ? "is-active" : undefined}
+                      style={{ background: color.value, color: color.value }}
+                      onClick={() => updateSettings({ neon: color.id })}
+                    />
+                  );
+                })}
+              </div>
+            </div>
           </Section>
 
           {/* B. Active vehicle (selection moved to Garage tab) */}
@@ -237,6 +272,9 @@ export function SettingsModal({ open, onClose }: Props) {
       </div>
     </div>
   );
+
+  const shell = document.querySelector(".sg-app-shell");
+  return shell ? createPortal(modal, shell) : modal;
 }
 
 const inputCls =

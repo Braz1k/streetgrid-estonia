@@ -1,4 +1,6 @@
 // Mock data for STREETGRID. Estonia-wide.
+import { normalizeStoredMedia, type StoredMedia } from "./media";
+import type { NicknameColorId } from "./nickname";
 import { DEFAULT_REPUTATION, mockReputation, type ReputationProgress } from "./reputation";
 import type { VehicleRarity } from "./vehicles";
 
@@ -27,13 +29,134 @@ export const getCity = (id: CityId) => CITIES.find((c) => c.id === id) ?? CITIES
 export const navUrl = ([lat, lng]: [number, number]) =>
   `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
 
+export type CarSpecifications = {
+  engine?: string;
+  fuel?: string;
+  displacement?: string;
+  cylinders?: string;
+  induction?: string;
+  drivetrain?: string;
+  transmission?: string;
+  torque?: string;
+  zeroTo100?: string;
+  topSpeed?: string;
+};
+
+export const CAR_SPECIFICATION_KEYS = [
+  "engine",
+  "fuel",
+  "displacement",
+  "cylinders",
+  "induction",
+  "drivetrain",
+  "transmission",
+  "torque",
+  "zeroTo100",
+  "topSpeed",
+] as const satisfies readonly (keyof CarSpecifications)[];
+
+export type CarSpecificationKey = (typeof CAR_SPECIFICATION_KEYS)[number];
+
+/** Keep only non-empty string fields. Missing or invalid input stays empty. */
+export function compactCarSpecifications(value: unknown): CarSpecifications | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  const next: CarSpecifications = {};
+  for (const key of CAR_SPECIFICATION_KEYS) {
+    const field = row[key];
+    if (typeof field !== "string") continue;
+    const text = field.trim();
+    if (!text) continue;
+    next[key] = text;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+export const BUILD_HISTORY_TYPES = ["purchase", "modification", "service", "milestone"] as const;
+
+export type BuildHistoryType = (typeof BUILD_HISTORY_TYPES)[number];
+
+export const BUILD_HISTORY_PHOTO_LIMIT = 3;
+
+export const BUILD_HISTORY_TYPE_LABEL: Record<BuildHistoryType, string> = {
+  purchase: "ПОКУПКА",
+  modification: "МОДИФИКАЦИЯ",
+  service: "ОБСЛУЖИВАНИЕ",
+  milestone: "ЭТАП",
+};
+
+export type BuildHistoryEntry = {
+  id: string;
+  date: string;
+  title: string;
+  description?: string;
+  type: BuildHistoryType;
+  photos?: StoredMedia[];
+};
+
+function isBuildHistoryType(value: unknown): value is BuildHistoryType {
+  return typeof value === "string" && (BUILD_HISTORY_TYPES as readonly string[]).includes(value);
+}
+
+function isIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+/** Drop invalid rows. Keep stored order. Missing history stays empty. */
+export function readBuildHistory(value: unknown): BuildHistoryEntry[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const next: BuildHistoryEntry[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Partial<BuildHistoryEntry>;
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const date = typeof row.date === "string" ? row.date : "";
+    const title = typeof row.title === "string" ? row.title.trim() : "";
+    if (!id || seen.has(id) || !isIsoDate(date) || !title || !isBuildHistoryType(row.type)) continue;
+    const entry: BuildHistoryEntry = { id, date, title, type: row.type };
+    if (typeof row.description === "string" && row.description.trim()) entry.description = row.description.trim();
+    if (Array.isArray(row.photos)) {
+      const photos: StoredMedia[] = [];
+      for (const photo of row.photos) {
+        const media = normalizeStoredMedia(photo);
+        if (!media) continue;
+        photos.push(media);
+        if (photos.length >= BUILD_HISTORY_PHOTO_LIMIT) break;
+      }
+      if (photos.length > 0) entry.photos = photos;
+    }
+    seen.add(id);
+    next.push(entry);
+  }
+  return next.length > 0 ? next : undefined;
+}
+
+/** Newest date first. Equal dates keep their current relative order. */
+export function sortBuildHistory(entries: readonly BuildHistoryEntry[]): BuildHistoryEntry[] {
+  return entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => {
+      if (a.entry.date === b.entry.date) return a.index - b.index;
+      return a.entry.date < b.entry.date ? 1 : -1;
+    })
+    .map((row) => row.entry);
+}
+
 export type Car = {
   make: string;
   model: string;
   year: number;
   hp: number;
   specs: string[];
-  photos: string[];
+  photos: StoredMedia[];
+  /** Primary real-car photo for МОЙ АВТО. Independent from photos[] and the profile background. */
+  photo?: StoredMedia | null;
+  specifications?: CarSpecifications;
+  buildHistory?: BuildHistoryEntry[];
 };
 
 export type UserProfile = {
@@ -45,6 +168,8 @@ export type UserProfile = {
   level: number;
   rarity: VehicleRarity;
   reputation: ReputationProgress;
+  /** Profile-identity nickname color. Missing values render as white. */
+  nicknameColor?: NicknameColorId;
   car: Car;
 };
 
@@ -59,6 +184,8 @@ export type Meet = {
   organizer: string;
   going: number;
   cover: string;
+  /** Present only on Meets created by the current user. */
+  createdBy?: "self";
 };
 
 export type Route = {
@@ -75,6 +202,8 @@ export type Route = {
 
 export type SosType = "battery" | "fuel" | "tire" | "tow" | "other";
 
+export type SosStatus = "active" | "cancelled" | "resolved";
+
 export type SosSignal = {
   id: string;
   type: SosType;
@@ -83,7 +212,12 @@ export type SosSignal = {
   user: string;
   coords: [number, number];
   time: string;
+  status?: SosStatus;
 };
+
+export function isActiveSos(signal: SosSignal): boolean {
+  return (signal.status ?? "active") === "active";
+}
 
 export const ME: UserProfile = {
   id: "me",

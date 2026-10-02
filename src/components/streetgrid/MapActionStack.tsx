@@ -35,7 +35,7 @@ export function MapActionStack({
           buildingsVisible && "sg-map-fab--buildings-active",
         )}
       >
-        <Building2 className="sg-map-fab__buildings-icon" strokeWidth={2.1} aria-hidden />
+        <Building2 className="sg-map-fab__buildings-icon" strokeWidth={1.85} aria-hidden />
         <span className="sg-map-fab__buildings-label">3D</span>
       </button>
       <button
@@ -45,7 +45,7 @@ export function MapActionStack({
         aria-pressed={sosOpen}
         className={cn("sg-map-fab sg-map-fab--sos", sosOpen && "sg-map-fab--sos-active")}
       >
-        <Siren className="sg-map-fab__sos-icon" strokeWidth={2.25} aria-hidden />
+        <Siren className="sg-map-fab__sos-icon" strokeWidth={1.9} aria-hidden />
         <span className="sg-map-fab__sos-label">SOS</span>
       </button>
     </>

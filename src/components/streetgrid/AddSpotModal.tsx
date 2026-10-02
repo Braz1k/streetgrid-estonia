@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { X, MapPin } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,8 +21,8 @@ export function AddSpotModal({ open, onClose, onSubmit }: Props) {
     setDesc("");
   };
 
-  return (
-    <div onClick={onClose} className="fixed inset-0 z-[999] bg-black/70 backdrop-blur-sm grid place-items-end sm:place-items-center animate-float-up">
+  const modal = (
+    <div onClick={onClose} className="absolute inset-0 z-[999] bg-black/70 backdrop-blur-sm grid place-items-end sm:place-items-center animate-float-up">
       <div onClick={(e) => e.stopPropagation()} className="w-full max-w-[480px] glass-strong rounded-t-3xl sm:rounded-3xl p-5 border-t border-[#00f0ff]/30">
         <div className="flex items-center justify-between mb-4">
           <div>
@@ -68,4 +69,7 @@ export function AddSpotModal({ open, onClose, onSubmit }: Props) {
       </div>
     </div>
   );
+
+  const shell = document.querySelector(".sg-app-shell");
+  return shell ? createPortal(modal, shell) : modal;
 }

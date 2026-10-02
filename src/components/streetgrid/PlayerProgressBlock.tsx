@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import { useStreetGrid } from "@/lib/streetgrid/store";
-import { getPlayerLevel, getXpBarPercent, XP_PER_LEVEL } from "@/lib/streetgrid/vehicles";
+import { getXpBarPercent, XP_PER_LEVEL } from "@/lib/streetgrid/vehicles";
 
 export function usePlayerProgress() {
-  const { selectedCarId, getOwnedVehicle, vehicleProgress } = useStreetGrid();
-  const owned = getOwnedVehicle(selectedCarId);
-  const level = owned?.level ?? getPlayerLevel(vehicleProgress);
-  const currentXP = owned?.xp ?? 0;
+  const { playerProgress } = useStreetGrid();
+  const level = playerProgress.level;
+  const currentXP = playerProgress.xp;
   const requiredXP = XP_PER_LEVEL;
   const xpPct = getXpBarPercent(currentXP);
 
